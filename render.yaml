@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: uon-smart-backend
+    env: node
+    plan: free
+    buildCommand: cd backend && npm install
+    startCommand: cd backend && node server.js
+    envVars:
+      - key: LIPANA_SECRET_KEY
+        sync: false
+      - key: LIPANA_ENV
+        value: production
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+    autoDeploy: true
