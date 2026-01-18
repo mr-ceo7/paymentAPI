@@ -8,7 +8,17 @@ const helmet = require('helmet');
 dotenv.config();
 
 const app = express();
-app.use(helmet()); 
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com", "https://unpkg.com"],
+            imgSrc: ["'self'", "data:", "https:"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https:"],
+            connectSrc: ["'self'", "https:"],
+        },
+    },
+})); 
 app.use(express.json());
 // CORS: Allow requests from frontend
 app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
