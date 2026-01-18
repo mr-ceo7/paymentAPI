@@ -310,6 +310,14 @@ app.post('/api/manual-pay', async (req, res) => {
                 createdAt: admin.firestore.FieldValue.serverTimestamp()
             });
             console.log(`[Manual Pay] User ${uid} submitted code ${uniqueCode} for ${planId}`);
+            
+            // Emit Socket.IO event to notify mobile app
+            io.emit('request_verification', { 
+                transactionId: docRef.id,
+                mpesaCode: uniqueCode,
+                amount: plan.price
+            });
+            
             res.json({ success: true, transactionId: docRef.id, message: "Verification in progress" });
             return;
         } else {
@@ -326,12 +334,23 @@ app.post('/api/manual-pay', async (req, res) => {
                 type: 'MANUAL',
                 createdAt: new Date()
              });
+             
+             // Emit Socket.IO event even in mock mode
+             io.emit('request_verification', { 
+                transactionId: mockId,
+                mpesaCode: uniqueCode,
+                amount: plan.price
+            });
+             
              res.json({ success: true, transactionId: mockId, message: "Verification in progress" });
         }
 
     } catch (error) {
-        console.error("Manual Pay Error:", error);
-        res.status(500).json({ error: 'Submission failed' });
+        console.error("Manual Pay Error DETAILS:", error);
+        console.error("Error stack:", error.stack);
+        console.error("Error name:", error.name);
+        console.error("Error message:", error.message);
+        res.status(500).json({ error: 'Submission failed', details: error.message });
     }
 });
 
