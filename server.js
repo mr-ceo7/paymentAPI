@@ -545,18 +545,29 @@ app.get('/api/dashboard/stats', async (req, res) => {
             });
         } else {
             // Mock Stats
+            console.log('[Dashboard] Using mock stats, mockTransactions count:', mockTransactions.size);
             mockTransactions.forEach(t => {
                 if (t.status === 'COMPLETED') {
                     stats.verified++;
-                    stats.revenue += t.amount;
+                    stats.revenue += (t.amount || 0);
                 } else if (t.status === 'FAILED') stats.rejected++;
                 else if (t.status === 'MANUAL_VERIFYING') stats.pending++;
             });
         }
+        console.log('[Dashboard] Stats:', stats);
         res.json(stats);
     } catch (e) {
-        console.error("Dashboard Stats Error:", e);
-        res.status(500).json({ error: "Failed to fetch stats" });
+        console.error("Dashboard Stats Error DETAILS:", e);
+        console.error("Error stack:", e.stack);
+        // Always return valid stats structure even on error
+        res.status(200).json({
+            verified: 0,
+            rejected: 0,
+            pending: 0,
+            revenue: 0,
+            isPhoneConnected: false,
+            error: e.message
+        });
     }
 });
 
