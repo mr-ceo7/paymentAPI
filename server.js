@@ -690,7 +690,7 @@ app.get('/dashboard', (req, res) => {
                     const res = await fetch('/api/dashboard/clear-stats', { method: 'POST' });
                     const data = await res.json();
                     if (data.success) {
-                        alert(`Successfully cleared ${data.deleted} transactions`);
+                        alert('Successfully cleared ' + data.deleted + ' transactions');
                         fetchStats(); // Refresh stats
                     }
                 } catch (e) {
@@ -710,7 +710,7 @@ app.get('/dashboard', (req, res) => {
                     const time = new Date(log.timestamp).toLocaleTimeString();
                     const logLine = document.createElement('div');
                     logLine.className = 'text-gray-300';
-                    logLine.innerHTML = `<span class="text-gray-500">[${time}]</span> ${log.message}`;
+                    logLine.innerHTML = '<span class="text-gray-500">[' + time + ']</span> ' + log.message;
                     logsContainer.appendChild(logLine);
                     
                     // Auto-scroll to bottom
