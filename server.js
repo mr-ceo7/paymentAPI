@@ -39,6 +39,8 @@ if (!db) {
 // Lipana Config
 const LIPANA_BASE_URL = 'https://api.lipana.dev/v1';
 
+let lastAppHeartbeat = 0; // Timestamp of last poll from mobile app
+
 // Plans (Sync with frontend if needed, but validation happens here)
 const PLANS = {
     'starter': { credits: 3, price: 1 },
@@ -153,28 +155,26 @@ app.get('/api/payment-status', (req, res) => {
             enabled = true; // Always enable in dev if key exists (even mock)
         } else {
             // In Production (or non-dev)
-            // Enable only if key exists. Mock key might be undesirable in prod? 
-            // User said: "SET LIPANA KEYS LATER".
-            // So if key is missing -> false. If present -> true.
             enabled = true;
         }
     } else {
         // No key
         if (isDev) {
-             // Allow enabling in dev without key? No, logic relies on key.
-             // But maybe for UI testing we want it?
-             // User said: "UNLESS WE ARE ON DEVELOPMENT ON LOCAL HOST" implies dev *can* show it even if "not ready"?
-             // Actually, usually dev enviroment has .env with mock key.
-             // Let's stick to: Enabled if Key exists.
-             enabled = false;
+             // Enable in dev to test UI/Manual flow even without Lipana keys
+             enabled = true;
         }
     }
 
     res.json({ 
-        paymentsEnabled: enabled,
+        paymentsEnabled: true, 
+        stkEnabled: enabled, 
+        manualEnabled: true,
         env: process.env.NODE_ENV
     });
 });
+
+// MOCK DB (In-Memory)
+const mockTransactions = new Map();
 
 // 2. Webhook Callback
 app.post('/api/callback', async (req, res) => {
@@ -234,6 +234,457 @@ app.post('/api/callback', async (req, res) => {
         res.sendStatus(500);
     }
 });
+
+// 3. Manual Payment Endpoints (Fallback)
+
+// Initiate Manual Payment
+app.post('/api/manual-pay', async (req, res) => {
+    const { code, planId, uid, phone } = req.body;
+
+    if (!code || !planId || !uid) {
+        return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const plan = PLANS[planId];
+    if (!plan) return res.status(400).json({ error: 'Invalid plan' });
+
+    // Sanitize code
+    const uniqueCode = code.toUpperCase().trim();
+
+    if (!/^[A-Z0-9]{10}$/.test(uniqueCode)) {
+        return res.status(400).json({ error: 'Invalid M-Pesa Code format. Must be 10 characters.' });
+    }
+
+    try {
+        if (db) {
+            // Check if code already used
+            const existing = await db.collection('transactions').where('mpesaCode', '==', uniqueCode).get();
+            if (!existing.empty) {
+                // If it exists but failed, maybe allow retry? For now, simplified:
+                // actually, if it exists and is COMPLETED, reject.
+                const isUsed = existing.docs.some(d => d.data().status === 'COMPLETED');
+                if (isUsed) {
+                    return res.status(400).json({ error: 'Transaction code already used' });
+                }
+            }
+
+            // Create Transaction
+            const docRef = db.collection('transactions').doc(); // Auto-ID
+            await docRef.set({
+                uid,
+                planId,
+                amount: plan.price,
+                phone: phone || 'MANUAL',
+                mpesaCode: uniqueCode,
+                status: 'MANUAL_VERIFYING',
+                type: 'MANUAL',
+                createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            console.log(`[Manual Pay] User ${uid} submitted code ${uniqueCode} for ${planId}`);
+            res.json({ success: true, transactionId: docRef.id, message: "Verification in progress" });
+            return;
+        } else {
+             console.log(`[MOCK DB] Manual Pay: ${uniqueCode} for ${planId}`);
+             const mockId = `mock_txn_${Date.now()}`;
+             mockTransactions.set(mockId, {
+                id: mockId,
+                uid,
+                planId,
+                amount: plan.price,
+                phone: phone || 'MANUAL',
+                mpesaCode: uniqueCode,
+                status: 'MANUAL_VERIFYING',
+                type: 'MANUAL',
+                createdAt: new Date()
+             });
+             res.json({ success: true, transactionId: mockId, message: "Verification in progress" });
+        }
+
+    } catch (error) {
+        console.error("Manual Pay Error:", error);
+        res.status(500).json({ error: 'Submission failed' });
+    }
+});
+
+// Check Transaction Status (Polling Fallback)
+app.get('/api/transaction-status/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        if (!db) {
+            // Mock
+            const txn = mockTransactions.get(id);
+            if (!txn) return res.status(404).json({ error: 'Transaction not found' });
+            return res.json({ status: txn.status });
+        }
+
+        const doc = await db.collection('transactions').doc(id).get();
+        if (!doc.exists) return res.status(404).json({ error: 'Transaction not found' });
+        
+        return res.json({ status: doc.data().status });
+    } catch (e) {
+        console.error("Status Poll Error:", e);
+        res.status(500).json({ error: 'Poll failed' });
+    }
+});
+
+// Update status response
+app.get('/api/payment-status', (req, res) => {
+    // Check if Stripe/Lipana keys exist
+    const hasKey = !!process.env.LIPANA_CONSUMER_KEY && !!process.env.LIPANA_CONSUMER_SECRET;
+    const isDev = process.env.NODE_ENV !== 'production';
+    
+    let stkEnabled = hasKey;
+    // if (!hasKey && isDev) stkEnabled = true; // Disable Mock to test fallback UI
+
+    res.json({ 
+        paymentsEnabled: true, 
+        stkEnabled: stkEnabled, 
+        manualEnabled: true,
+        env: process.env.NODE_ENV,
+        // Dynamic Payment Details
+        payType: process.env.MPESA_PAYMENT_TYPE || 'Buy Goods (Till)',
+        payNumber: process.env.MPESA_PAYMENT_NUMBER || '6960795',
+        payName: process.env.MPESA_PAYMENT_NAME || 'UoN Smart Timetable'
+    });
+});
+
+// Poll for Pending Verifications (Called by NTFY5 App)
+app.get('/api/pending-verifications', async (req, res) => {
+    lastAppHeartbeat = Date.now(); // Update heartbeat
+    try {
+        if (!db) {
+            // Return from Mock DB
+            const pending = Array.from(mockTransactions.values())
+                .filter(t => t.status === 'MANUAL_VERIFYING')
+                .map(t => ({
+                    id: t.id,
+                    code: t.mpesaCode,
+                    amount: t.amount,
+                    date: t.createdAt.toISOString()
+                }));
+            return res.json({ pending }); 
+        }
+
+        const snapshot = await db.collection('transactions')
+            .where('status', '==', 'MANUAL_VERIFYING')
+            .limit(50) // Batch size
+            .get();
+
+        const pending = snapshot.docs.map(doc => ({
+            id: doc.id,
+            code: doc.data().mpesaCode,
+            amount: doc.data().amount,
+            date: doc.data().createdAt?.toDate().toISOString() // Optional date check?
+        }));
+
+        res.json({ pending });
+    } catch (error) {
+        console.error("Fetch Pending Error:", error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Submit Verification Result (Called by NTFY5 App)
+app.post('/api/verify-result', async (req, res) => {
+    const { transactionId, isValid, metadata } = req.body;
+
+    if (!transactionId || isValid === undefined) {
+         return res.status(400).json({ error: 'Missing fields' });
+    }
+
+    try {
+        if (!db) {
+            // Handle Mock DB
+             if (mockTransactions.has(transactionId)) {
+                const txn = mockTransactions.get(transactionId);
+                if (txn.status !== 'MANUAL_VERIFYING') return res.status(400).json({ error: 'Not pending' });
+                
+                if (isValid) {
+                    txn.status = 'COMPLETED';
+                    txn.verifiedAt = new Date();
+                    console.log(`[MOCK DB] Verified ${transactionId}`);
+                } else {
+                    txn.status = 'FAILED';
+                    txn.verifiedAt = new Date();
+                    console.log(`[MOCK DB] Rejected ${transactionId}`);
+                }
+                return res.json({ success: true });
+            }
+            return res.json({ success: true }); // Ignore if not found in mock
+        }
+
+        const txnRef = db.collection('transactions').doc(transactionId);
+        const txnDoc = await txnRef.get();
+
+        if (!txnDoc.exists) {
+            return res.status(404).json({ error: 'Transaction not found' });
+        }
+
+        const txnData = txnDoc.data();
+        if (txnData.status !== 'MANUAL_VERIFYING') {
+            return res.status(400).json({ error: 'Transaction not pending verification' });
+        }
+
+        if (isValid) {
+            const plan = PLANS[txnData.planId];
+            const userRef = db.collection('users').doc(txnData.uid);
+
+            // Fulfill
+             if (txnData.planId === 'unlimited') {
+                const expiresAt = new Date();
+                expiresAt.setDate(expiresAt.getDate() + 30);
+                await userRef.update({
+                    unlimitedExpiresAt: expiresAt.toISOString(),
+                    lastPaymentRef: transactionId
+                });
+            } else {
+                await userRef.update({
+                    credits: admin.firestore.FieldValue.increment(plan.credits),
+                    lastPaymentRef: transactionId
+                });
+            }
+
+            await txnRef.update({ 
+                status: 'COMPLETED', 
+                verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+                verificationMetadata: metadata || {} 
+            });
+            console.log(`[Manual Verify] Validated ${transactionId}`);
+        } else {
+             await txnRef.update({ 
+                status: 'FAILED', 
+                verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+                 verificationMetadata: metadata || {} 
+            });
+            console.log(`[Manual Verify] Rejected ${transactionId}`);
+        }
+
+        res.json({ success: true });
+
+    } catch (error) {
+        console.error("Verify Result Error:", error);
+        res.status(500).json({ error: 'Update failed' });
+    }
+});
+
+
+// --- DASHBOARD ENDPOINTS ---
+
+app.get('/api/dashboard/stats', async (req, res) => {
+    const isConnected = (Date.now() - lastAppHeartbeat) < 8000; // < 8 seconds considered online (poll is 2s)
+    
+    let stats = {
+        verified: 0,
+        rejected: 0,
+        pending: 0,
+        revenue: 0,
+        isPhoneConnected: isConnected
+    };
+
+    try {
+        if (db) {
+            const snapshot = await db.collection('transactions').get();
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                if (data.status === 'COMPLETED') {
+                    stats.verified++;
+                    stats.revenue += (data.amount || 0);
+                } else if (data.status === 'FAILED') {
+                    stats.rejected++;
+                } else if (data.status === 'MANUAL_VERIFYING') {
+                    stats.pending++;
+                }
+            });
+        } else {
+            // Mock Stats
+            mockTransactions.forEach(t => {
+                if (t.status === 'COMPLETED') {
+                    stats.verified++;
+                    stats.revenue += t.amount;
+                } else if (t.status === 'FAILED') stats.rejected++;
+                else if (t.status === 'MANUAL_VERIFYING') stats.pending++;
+            });
+        }
+        res.json(stats);
+    } catch (e) {
+        console.error("Dashboard Stats Error:", e);
+        res.status(500).json({ error: "Failed to fetch stats" });
+    }
+});
+
+app.get('/dashboard', (req, res) => {
+    const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Payment Dashboard</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://unpkg.com/lucide@latest"></script>
+        <style>
+            .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+        </style>
+    </head>
+    <body class="bg-gray-900 text-white min-h-screen p-8 font-sans">
+        <div class="max-w-5xl mx-auto space-y-8">
+            <header class="flex justify-between items-center bg-gray-800/50 p-6 rounded-2xl glass">
+                <div>
+                    <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">System Dashboard</h1>
+                    <p class="text-gray-400 text-sm">Real-time payment monitoring</p>
+                </div>
+                <div class="flex items-center gap-3 px-4 py-2 rounded-full bg-gray-800 border border-gray-700">
+                    <div id="status-dot" class="w-3 h-3 rounded-full bg-red-500 animate-pulse"></div>
+                    <span id="status-text" class="text-sm font-bold text-red-400">OFFLINE</span>
+                </div>
+            </header>
+
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                <!-- Verified -->
+                <div class="glass p-6 rounded-2xl border-l-4 border-green-500">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-gray-400 text-xs font-bold uppercase tracking-widest">Verified</p>
+                            <h2 id="val-verified" class="text-4xl font-black mt-2">0</h2>
+                        </div>
+                        <i data-lucide="check-circle" class="text-green-500 w-8 h-8"></i>
+                    </div>
+                </div>
+
+                <!-- Rejected -->
+                <div class="glass p-6 rounded-2xl border-l-4 border-red-500">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-gray-400 text-xs font-bold uppercase tracking-widest">Rejected</p>
+                            <h2 id="val-rejected" class="text-4xl font-black mt-2">0</h2>
+                        </div>
+                        <i data-lucide="x-circle" class="text-red-500 w-8 h-8"></i>
+                    </div>
+                </div>
+
+                <!-- Pending -->
+                <div class="glass p-6 rounded-2xl border-l-4 border-yellow-500">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-gray-400 text-xs font-bold uppercase tracking-widest">Pending</p>
+                            <h2 id="val-pending" class="text-4xl font-black mt-2">0</h2>
+                        </div>
+                        <i data-lucide="clock" class="text-yellow-500 w-8 h-8"></i>
+                    </div>
+                </div>
+
+                <!-- Revenue -->
+                <div class="glass p-6 rounded-2xl border-l-4 border-blue-500 bg-gradient-to-br from-blue-900/20 to-transparent">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-blue-300 text-xs font-bold uppercase tracking-widest">Total Revenue</p>
+                            <h2 class="text-4xl font-black mt-2 flex items-baseline gap-1">
+                                <span class="text-lg text-gray-400">KES</span>
+                                <span id="val-revenue">0</span>
+                            </h2>
+                        </div>
+                        <i data-lucide="wallet" class="text-blue-500 w-8 h-8"></i>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="text-center text-gray-500 text-xs mt-12">
+                Auto-refreshes every 2 seconds
+            </div>
+        </div>
+
+        <script>
+            lucide.createIcons();
+
+            async function fetchStats() {
+                try {
+                    const res = await fetch('/api/dashboard/stats');
+                    const data = await res.json();
+                    
+                    // Update Values
+                    document.getElementById('val-verified').textContent = data.verified;
+                    document.getElementById('val-rejected').textContent = data.rejected;
+                    document.getElementById('val-pending').textContent = data.pending;
+                    document.getElementById('val-revenue').textContent = data.revenue.toLocaleString();
+                    
+                    // Update Connection Status
+                    const dot = document.getElementById('status-dot');
+                    const text = document.getElementById('status-text');
+                    
+                    if (data.isPhoneConnected) {
+                        dot.className = "w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_10px_#10b981]";
+                        text.className = "text-sm font-bold text-emerald-400";
+                        text.textContent = "PHONE CONNECTED";
+                    } else {
+                        dot.className = "w-3 h-3 rounded-full bg-red-500 animate-pulse";
+                        text.className = "text-sm font-bold text-red-500";
+                        text.textContent = "PHONE DISCONNECTED";
+                    }
+
+                } catch (e) {
+                    console.error("Stats fail", e);
+                }
+            }
+
+            fetchStats();
+            setInterval(fetchStats, 2000);
+        </script>
+    </body>
+    </html>
+    `;
+    res.send(html);
+});
+
+// --- BACKGROUND TASKS ---
+
+// Periodically expire stale transactions (Stuck in 'MANUAL_VERIFYING' for > 60s)
+// This handles cases where the Admin App missed the transaction or looked it up but found nothing (and didn't report back yet)
+setInterval(async () => {
+    try {
+        if (db) {
+            const cutoff = new Date(Date.now() - 60000); // 60 seconds ago
+            
+            const snapshot = await db.collection('transactions')
+                .where('status', '==', 'MANUAL_VERIFYING')
+                .get();
+
+            if (snapshot.empty) return;
+
+            const batch = db.batch();
+            let updateCount = 0;
+
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                // createdAt can be null instantly after creation (latency), check existence
+                if (data.createdAt && data.createdAt.toDate() < cutoff) {
+                    batch.update(doc.ref, { 
+                        status: 'FAILED',
+                        verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        failureReason: 'Timeout - Code not found or System busy'
+                    });
+                    updateCount++;
+                }
+            });
+
+            if (updateCount > 0) {
+                await batch.commit();
+                console.log(`[Cleanup] Expired ${updateCount} stale transactions.`);
+            }
+        } else {
+            // Cleanup Mock
+            const cutoff = Date.now() - 60000;
+            mockTransactions.forEach(t => {
+                if (t.status === 'MANUAL_VERIFYING' && t.createdAt.getTime() < cutoff) {
+                    t.status = 'FAILED';
+                    t.verifiedAt = new Date();
+                    console.log(`[Cleanup Mock] Expired ${t.id}`);
+                }
+            });
+        }
+    } catch (error) {
+        console.error("[Cleanup] Error expiring transactions:", error);
+    }
+}, 10000); // Run every 10 seconds
 
 app.listen(PORT, () => {
     console.log(`Secure Server running on port ${PORT}`);
