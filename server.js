@@ -4,10 +4,27 @@ const axios = require('axios');
 const dotenv = require('dotenv');
 const admin = require('firebase-admin');
 const helmet = require('helmet');
+const http = require('http');
+const { Server } = require("socket.io");
 
 dotenv.config();
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: process.env.FRONTEND_URL || '*',
+        methods: ["GET", "POST"]
+    }
+});
+
+io.on('connection', (socket) => {
+    console.log('Client connected:', socket.id);
+    socket.on('disconnect', () => {
+        console.log('Client disconnected:', socket.id);
+    });
+});
+
 app.use(helmet({
     contentSecurityPolicy: {
         directives: {
