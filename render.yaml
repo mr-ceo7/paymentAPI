@@ -3,8 +3,8 @@ services:
     name: uon-smart-backend
     env: node
     plan: free
-    buildCommand: cd backend && npm install
-    startCommand: cd backend && node server.js
+    buildCommand: npm install
+    startCommand: node server.js
     envVars:
       - key: LIPANA_SECRET_KEY
         sync: false
@@ -14,4 +14,12 @@ services:
         sync: false
       - key: FRONTEND_URL
         sync: false
+      - key: MPESA_PAYMENT_TYPE
+        sync: false
+      - key: MPESA_PAYMENT_NUMBER
+        sync: false
+      - key: MPESA_PAYMENT_NAME
+        sync: false
+      - key: NODE_VERSION
+        value: 20.11.0
     autoDeploy: true

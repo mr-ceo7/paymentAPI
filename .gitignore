@@ -2,3 +2,8 @@ node_modules/
 .env
 .DS_Store
 *.log
+exam-timetables-uon-firebase-adminsdk-fbsvc-c0621e9471.json
+firebase-service-account.json
+# Ignore all unknown json files except config
+!package.json
+!package-lock.json

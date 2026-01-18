@@ -6,6 +6,8 @@ const admin = require('firebase-admin');
 const helmet = require('helmet');
 const http = require('http');
 const { Server } = require("socket.io");
+const path = require('path');
+const fs = require('fs');
 
 dotenv.config();
 
@@ -615,7 +617,31 @@ app.get('/dashboard', (req, res) => {
                 </div>
             </div>
             
-            <div class="text-center text-gray-500 text-xs mt-12">
+            <!-- Action Buttons -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-8">
+                <button onclick="clearStats()" class="glass p-4 rounded-xl border border-red-500/50 hover:bg-red-500/10 transition-all flex items-center justify-center gap-3 group">
+                    <i data-lucide="trash-2" class="text-red-400 w-5 h-5 group-hover:scale-110 transition-transform"></i>
+                    <span class="text-red-400 font-bold">Clear All Stats</span>
+                </button>
+                
+                <a href="/api/download/app" class="glass p-4 rounded-xl border border-blue-500/50 hover:bg-blue-500/10 transition-all flex items-center justify-center gap-3 group">
+                    <i data-lucide="download" class="text-blue-400 w-5 h-5 group-hover:scale-110 transition-transform"></i>
+                    <span class="text-blue-400 font-bold">Download Android App</span>
+                </a>
+            </div>
+
+            <!-- Live Logs -->
+            <div class="glass p-6 rounded-2xl mt-8">
+                <div class="flex items-center gap-3 mb-4">
+                    <i data-lucide="terminal" class="text-emerald-400 w-6 h-6"></i>
+                    <h3 class="text-xl font-bold text-emerald-400">Live Server Logs</h3>
+                </div>
+                <div id="logs-container" class="bg-black/50 rounded-lg p-4 h-64 overflow-y-auto font-mono text-xs text-gray-300 space-y-1">
+                    <div class="text-gray-500 italic">Connecting to log stream...</div>
+                </div>
+            </div>
+            
+            <div class="text-center text-gray-500 text-xs mt-6">
                 Auto-refreshes every 2 seconds
             </div>
         </div>
@@ -655,6 +681,54 @@ app.get('/dashboard', (req, res) => {
 
             fetchStats();
             setInterval(fetchStats, 2000);
+
+            // Clear Stats Function
+            async function clearStats() {
+                if (!confirm('Are you sure you want to clear ALL transaction stats? This cannot be undone.')) return;
+                
+                try {
+                    const res = await fetch('/api/dashboard/clear-stats', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success) {
+                        alert(`Successfully cleared ${data.deleted} transactions`);
+                        fetchStats(); // Refresh stats
+                    }
+                } catch (e) {
+                    alert('Failed to clear stats: ' + e.message);
+                }
+            }
+
+            // Connect to Live Logs
+            function connectLogs() {
+                const logsContainer = document.getElementById('logs-container');
+                const eventSource = new EventSource('/api/dashboard/logs');
+                
+                logsContainer.innerHTML = '<div class="text-emerald-400">Connected to log stream</div>';
+                
+                eventSource.onmessage = (event) => {
+                    const log = JSON.parse(event.data);
+                    const time = new Date(log.timestamp).toLocaleTimeString();
+                    const logLine = document.createElement('div');
+                    logLine.className = 'text-gray-300';
+                    logLine.innerHTML = `<span class="text-gray-500">[${time}]</span> ${log.message}`;
+                    logsContainer.appendChild(logLine);
+                    
+                    // Auto-scroll to bottom
+                    logsContainer.scrollTop = logsContainer.scrollHeight;
+                    
+                    // Keep only last 50 logs
+                    while (logsContainer.children.length > 50) {
+                        logsContainer.removeChild(logsContainer.firstChild);
+                    }
+                };
+                
+                eventSource.onerror = () => {
+                    logsContainer.innerHTML = '<div class="text-red-400">Disconnected. Reconnecting...</div>';
+                    setTimeout(connectLogs, 3000);
+                };
+            }
+
+            connectLogs();
         </script>
     </body>
     </html>
@@ -712,6 +786,73 @@ setInterval(async () => {
         console.error("[Cleanup] Error expiring transactions:", error);
     }
 }, 10000); // Run every 10 seconds
+
+// Dashboard: Clear All Stats
+app.post('/api/dashboard/clear-stats', async (req, res) => {
+    try {
+        if (db) {
+            const snapshot = await db.collection('transactions').get();
+            const batch = db.batch();
+            snapshot.forEach(doc => batch.delete(doc.ref));
+            await batch.commit();
+            console.log(`[Dashboard] Cleared ${snapshot.size} transactions`);
+            res.json({ success: true, deleted: snapshot.size });
+        } else {
+            // Clear mock
+            const count = mockTransactions.length;
+            mockTransactions.length = 0;
+            res.json({ success: true, deleted: count });
+        }
+    } catch (e) {
+        console.error("[Dashboard] Clear stats error:", e);
+        res.status(500).json({ error: "Failed to clear stats" });
+    }
+});
+
+// Dashboard: Live Logs (Server-Sent Events)
+const logBuffer = [];
+const MAX_LOG_BUFFER = 100;
+
+// Override console.log to capture logs
+const originalLog = console.log;
+console.log = (...args) => {
+    const message = args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ');
+    const timestamp = new Date().toISOString();
+    logBuffer.push({ timestamp, message });
+    if (logBuffer.length > MAX_LOG_BUFFER) logBuffer.shift();
+    originalLog.apply(console, args);
+};
+
+app.get('/api/dashboard/logs', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    
+    // Send buffered logs first
+    logBuffer.forEach(log => {
+        res.write(`data: ${JSON.stringify(log)}\n\n`);
+    });
+    
+    // Send new logs as they come
+    const interval = setInterval(() => {
+        if (logBuffer.length > 0) {
+            const latest = logBuffer[logBuffer.length - 1];
+            res.write(`data: ${JSON.stringify(latest)}\n\n`);
+        }
+    }, 1000);
+    
+    req.on('close', () => clearInterval(interval));
+});
+
+// APK Download endpoint
+app.get('/api/download/app', (req, res) => {
+    const apkPath = path.join(__dirname, 'public', 'paymentAPI.apk');
+    if (fs.existsSync(apkPath)) {
+        res.download(apkPath, 'paymentAPI.apk');
+    } else {
+        res.status(404).json({ error: 'APK not found. Please build and upload the release APK.' });
+    }
+});
 
 app.listen(PORT, () => {
     console.log(`Secure Server running on port ${PORT}`);
