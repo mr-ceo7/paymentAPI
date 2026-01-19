@@ -519,6 +519,21 @@ async function getStatsData() {
     return { ...stats, isPhoneConnected: isConnected };
 }
 
+// Function to broadcast stats to connected clients
+async function broadcastStats() {
+    try {
+        const stats = await LocalDB.getStats();
+        const appConnected = (Date.now() - lastAppHeartbeat) < 30000; // 30s timeout for app connection
+        
+        io.emit('stats_update', { 
+            ...stats,
+            appConnected 
+        });
+    } catch (e) {
+        console.error("Broadcast Error:", e);
+    }
+}
+
 app.get('/api/dashboard/stats', async (req, res) => {
     try {
         const stats = await getStatsData();
