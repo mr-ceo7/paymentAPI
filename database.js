@@ -142,6 +142,19 @@ class LocalDatabase {
         return result.changes;
     }
 
+    async pruneOldTransactions(daysToKeep = 7) {
+        const cutoffDate = new Date();
+        cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
+        const isoCutoff = cutoffDate.toISOString();
+
+        const result = await this.db.run(`
+            DELETE FROM transactions 
+            WHERE createdAt < ?
+        `, isoCutoff);
+        
+        return result.changes;
+    }
+
     async clearAllStats() {
         const result = await this.db.run("DELETE FROM transactions");
         return result.changes;

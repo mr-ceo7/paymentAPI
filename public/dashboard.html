@@ -68,7 +68,7 @@
         }
     </script>
 </head>
-<body class="text-white min-h-screen overflow-hidden flex flex-col relative px-4 py-6 md:p-8">
+<body class="text-white min-h-screen overflow-y-auto flex flex-col relative px-4 py-6 md:p-8">
 
     <!-- Ambient Background -->
     <div class="blob bg-blue-600 w-96 h-96 top-0 left-0 rounded-full mix-blend-screen"></div>
@@ -103,10 +103,10 @@
     </header>
 
     <!-- Main Grid -->
-    <div class="grid grid-cols-12 gap-6 flex-1 min-h-0">
+    <div class="grid grid-cols-12 gap-6 w-full">
         
         <!-- Left Column: Metrics & Charts (8 cols) -->
-        <div class="col-span-12 lg:col-span-8 flex flex-col gap-6 overflow-y-auto pr-2 pb-20">
+        <div class="col-span-12 lg:col-span-8 flex flex-col gap-6">
             
             <!-- Quick Stats Row -->
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -191,7 +191,7 @@
         </div>
 
         <!-- Right Column: Logs & Control (4 cols) -->
-        <div class="col-span-12 lg:col-span-4 flex flex-col gap-6 h-full min-h-[500px]">
+        <div class="col-span-12 lg:col-span-4 flex flex-col gap-6 h-[600px]">
             <!-- Live Logs -->
             <div class="glass rounded-2xl flex flex-col h-full overflow-hidden">
                 <div class="p-4 border-b border-gray-700/50 bg-black/20 flex justify-between items-center">

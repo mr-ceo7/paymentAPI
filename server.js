@@ -538,7 +538,6 @@ app.get('/dashboard', (req, res) => {
 // This handles cases where the Admin App missed the transaction or looked it up but found nothing (and didn't report back yet)
 setInterval(async () => {
     try {
-    try {
         const cutoff = new Date(Date.now() - 60000).toISOString();
         const changes = await LocalDB.expireStaleTransactions(cutoff);
         if (changes > 0) {
@@ -548,10 +547,21 @@ setInterval(async () => {
     } catch (error) {
         console.error("[Cleanup] Error expiring transactions:", error);
     }
-    } catch (error) {
-        console.error("[Cleanup] Error expiring transactions:", error);
-    }
 }, 10000); // Run every 10 seconds
+
+// Schedule Daily Log Cleanup (Keep 7 days history)
+setInterval(async () => {
+    try {
+        console.log('[Cleanup] Running Daily Prune...');
+        const deleted = await LocalDB.pruneOldTransactions(7);
+        if (deleted > 0) {
+            console.log(`[Cleanup] Pruned ${deleted} old transactions.`);
+            broadcastStats();
+        }
+    } catch (e) {
+        console.error("[Cleanup] Prune failed:", e);
+    }
+}, 24 * 60 * 60 * 1000);
 
 // Dashboard: Clear All Stats
 app.post('/api/dashboard/clear-stats', async (req, res) => {
