@@ -251,6 +251,24 @@ class LocalDatabase {
         }); // Note: 'update' op works for upsert in Firestore if we use set merge:true
     }
 
+    // Import from Cloud (Bypasses Sync Queue)
+    async importUser(data) {
+        const { uid, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef } = data;
+        
+        const existing = await this.db.get('SELECT uid FROM users WHERE uid = ?', uid);
+        
+        if (existing) {
+             await this.db.run(`
+                UPDATE users SET credits = ?, unlimitedExpiresAt = ?, lastDailyReset = ?, lastPaymentRef = ? WHERE uid = ?
+            `, [credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef, uid]);
+        } else {
+             await this.db.run(`
+                INSERT INTO users (uid, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef) VALUES (?, ?, ?, ?, ?)
+            `, [uid, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef]);
+        }
+        return { success: true };
+    }
+
     // --- Sync Queue ---
 
     async addToSyncQueue(collection, docId, operation, data) {

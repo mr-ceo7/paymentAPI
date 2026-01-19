@@ -48,6 +48,12 @@ app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
 // CORS: Allow requests from frontend
 app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
 
+// DEBUG: Log all requests
+app.use((req, res, next) => {
+    console.log(`[Request] ${req.method} ${req.url} from ${req.ip}`);
+    next();
+});
+
 const PORT = process.env.PORT || 5000;
 
 // ... (Firebase Init Code remains same, skipping for brevity in this replace block if it was outside target range, but here I am targeting start of file effectively or just ensuring I don't delete it.
@@ -80,7 +86,16 @@ const db = admin.apps.length > 0 ? admin.firestore() : null;
 (async () => {
     try {
         await LocalDB.init();
-        if (db) SyncService.start(db);
+        if (db) {
+            SyncService.start(db);
+            
+            // Auto-Hydrate if Empty
+            const users = await LocalDB.getAllUsers();
+            if (users.length === 0) {
+                console.log('[Server] LocalDB Users empty. Attempting auto-hydration from Cloud...');
+                await SyncService.hydrateUsers();
+            }
+        }
     } catch (e) {
         console.error("Failed to init LocalDB:", e);
     }
@@ -89,12 +104,28 @@ const db = admin.apps.length > 0 ? admin.firestore() : null;
 // Helper: Broadcast Stats to Dashboard
 async function broadcastStats() {
     try {
-        const stats = await getStatsData(); // reused existing helper which uses LocalDB
-        io.emit('dashboard_stats', stats);
+        const stats = await LocalDB.getStats();
+        const appConnected = (Date.now() - lastAppHeartbeat) < 30000;
+        
+        io.emit('stats_update', { 
+            ...stats,
+            appConnected 
+        });
     } catch (e) {
-        console.error("Broadcast Stats Error:", e);
+        console.error("Broadcast Monitor Error:", e);
     }
 }
+
+// Manual Sync Trigger
+app.post('/api/admin/sync-users', async (req, res) => {
+    try {
+        const count = await SyncService.hydrateUsers();
+        res.json({ success: true, count });
+    } catch (e) {
+        console.error("Manual Sync Failed:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
 
 // Lipana Config
 const LIPANA_BASE_URL = 'https://api.lipana.dev/v1';
@@ -377,7 +408,15 @@ app.get('/api/payment-status', (req, res) => {
 
 // Poll for Pending Verifications (Called by NTFY5 App)
 app.get('/api/pending-verifications', async (req, res) => {
+    const wasConnected = (Date.now() - lastAppHeartbeat) < 30000;
     lastAppHeartbeat = Date.now(); // Update heartbeat
+    
+    // IF it was offline and now pinged -> It's back ONLINE. Broadcast immediately.
+    if (!wasConnected) {
+        console.log("[Device] Reconnected!");
+        broadcastStats();
+    }
+
     try {
         const pending = await LocalDB.getPendingVerifications();
         // Format for frontend
@@ -393,6 +432,27 @@ app.get('/api/pending-verifications', async (req, res) => {
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
+
+// Heartbeat Monitor (Check for Disconnects)
+setInterval(() => {
+    const isConnected = (Date.now() - lastAppHeartbeat) < 30000;
+    // We need to track previous state to know if it CHANGED. 
+    // Using a simple global var for this loop might be cleaner? 
+    // Actually, let's just use the helper since broadcast sends the current state.
+    // Ideally we only broadcast if changed.
+    // Let's rely on the fact that if it's > 30s, we want to ensure UI knows.
+    // To avoid spamming, we can check a global `lastBroadcastState`?
+    // Start simpler: run every 10s. If we think it's disconnected, broadcast.
+    // Client-side handles idempotent updates fine.
+    
+    // Better:
+    // If (now - lastHeartbeat) is barely over 30s (e.g. < 40s), it implies it JUST disconnected.
+    const timeSince = Date.now() - lastAppHeartbeat;
+    if (timeSince > 30000 && timeSince < 40000) {
+         console.log("[Device] Connection Lost (Timeout)");
+         broadcastStats();
+    }
+}, 5000);
 
 // Submit Verification Result (Called by NTFY5 App)
 app.post('/api/verify-result', async (req, res) => {

@@ -41,12 +41,6 @@ class SyncService {
                 const docRef = this.firestore.collection(collection).doc(docId);
 
                 if (operation === 'create' || operation === 'update') {
-                    // For syncing, we can use set({ ... }, { merge: true }) to be safe
-                    // We need to handle potential timestamp conversions if data contains ISO strings that should be Timestamps
-                    // But for simple backup, raw JSON data is often fine. 
-                    // However, let's try to preserve the structure where possible.
-                    
-                    // Note: 'data' is already parsed JSON object because database.js handles parsing
                     await docRef.set(data, { merge: true });
                 } else if (operation === 'delete') {
                     await docRef.delete();
@@ -55,11 +49,6 @@ class SyncService {
                 processedIds.push(item.id);
             } catch (e) {
                 console.error(`[SyncService] Failed to sync item ${item.id}:`, e.message);
-                // Decide strategy: Retry? Delete?
-                // For now, if it fails, we might leave it in queue or mark it as error?
-                // To prevent blocking the queue forever on a bad item, we should probably remove it or have a retry count.
-                // Simple approach: Skip removal, let it retry next loop. But infinite loop risk.
-                // Better: Log and remove for now to keep queue moving.
                 console.warn(`[SyncService] Skipping item ${item.id} to avoid blockage.`);
                 processedIds.push(item.id); 
             }
@@ -69,6 +58,36 @@ class SyncService {
             await LocalDB.removeSyncItems(processedIds);
             console.log(`[SyncService] Synced ${processedIds.length} items to Cloud.`);
         }
+    }
+
+    // Hydrate LocalDB from Cloud (One-way downstream)
+    async hydrateUsers() {
+        if (!this.firestore) {
+            console.warn('[SyncService] Cannot hydrate: Firestore not connected.');
+            return 0;
+        }
+
+        console.log('[SyncService] Starting User Hydration...');
+        const snapshot = await this.firestore.collection('users').get();
+        if (snapshot.empty) {
+            console.log('[SyncService] No users found in Cloud.');
+            return 0;
+        }
+
+        let count = 0;
+        for (const doc of snapshot.docs) {
+            const data = doc.data();
+            await LocalDB.importUser({
+                uid: doc.id,
+                credits: data.credits || 0,
+                unlimitedExpiresAt: data.unlimitedExpiresAt || null,
+                lastDailyReset: data.lastDailyReset || null,
+                lastPaymentRef: data.lastPaymentRef || 'CLOUD_IMPORT'
+            });
+            count++;
+        }
+        console.log(`[SyncService] Hydrated ${count} users from Cloud.`);
+        return count;
     }
 }
 

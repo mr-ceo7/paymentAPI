@@ -240,6 +240,9 @@
             </div>
 
             <div class="flex gap-2">
+                 <button onclick="syncUsers()" class="px-3 py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 hover:text-indigo-300 rounded-lg text-sm border border-indigo-500/30 flex items-center gap-2 transition-colors" title="Download users from Firebase">
+                    <i data-lucide="cloud-download" class="w-4 h-4"></i> Sync Users
+                </button>
                  <button onclick="refreshCurrentDb()" class="px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm border border-white/10 flex items-center gap-2 transition-colors">
                     <i data-lucide="refresh-cw" class="w-4 h-4"></i> Refresh
                 </button>
@@ -760,6 +763,24 @@
             }
         }
 
+        async function syncUsers() {
+             if(!confirm("Sync users from Cloud (Firebase)? This may overwrite local credit updates if they haven't synced up yet.")) return;
+             
+             try {
+                showToast("Starting Cloud Sync...");
+                const res = await fetch('/api/admin/sync-users', { method: 'POST' });
+                const json = await res.json();
+                if(json.success) {
+                    showToast(`Synced ${json.count} users from Cloud.`);
+                    if(currentDbView === 'users') fetchUsers();
+                } else {
+                    showToast("Sync Failed: " + json.error);
+                }
+             } catch(e) {
+                 console.error(e);
+                 showToast("Sync Error");
+             }
+        }
     </script>
     
     <style>
