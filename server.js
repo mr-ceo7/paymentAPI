@@ -616,6 +616,6 @@ app.get('/api/download/app', (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log(`Secure Server running on port ${PORT}`);
 });
