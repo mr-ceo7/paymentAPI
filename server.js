@@ -612,14 +612,9 @@ app.post('/api/user/consume', async (req, res) => {
             // Actually, I can use `updateUserCredits` passing negative? No, it sets absolute value.
             // I will use `updateUserCredits` but passing calculated value `newCredits`.
             
-            await LocalDB.updateUserCredits(uid, -1, false, 'CONSUME'); // Wait, updateUserCredits adds `creditsToAdd`.
-            // Let's check LocalDB implementation.
-            /* 
-            async updateUserCredits(uid, creditsToAdd, isUnlimited, txnRef) {
-                // ...
-                newCredits += creditsToAdd; 
-            */
-            // Yes, it acts as incrementer! So passing -1 works perfectly.
+            await LocalDB.updateUserCredits(uid, -1, false, 'CONSUME'); 
+
+            console.log(`[Backend] Consumed 1 credit for ${uid}. New Balance: ${newCredits}`);
             
             res.json({ success: true, remaining: newCredits });
         } else {

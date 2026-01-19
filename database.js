@@ -47,6 +47,7 @@ class LocalDatabase {
         await this.db.exec(`
             CREATE TABLE IF NOT EXISTS users (
                 uid TEXT PRIMARY KEY,
+                email TEXT,
                 credits INTEGER DEFAULT 0,
                 unlimitedExpiresAt DATETIME,
                 lastDailyReset DATETIME,
@@ -63,6 +64,12 @@ class LocalDatabase {
             if (!hasColumn) {
                 console.log('[LocalDB] Migrating: Adding lastDailyReset column to users table...');
                 await this.db.exec("ALTER TABLE users ADD COLUMN lastDailyReset DATETIME");
+            }
+
+            const hasEmail = result.some(c => c.name === 'email');
+            if (!hasEmail) {
+                console.log('[LocalDB] Migrating: Adding email column to users table...');
+                await this.db.exec("ALTER TABLE users ADD COLUMN email TEXT");
             }
         } catch (e) {
             console.error('[LocalDB] Migration Error:', e);
