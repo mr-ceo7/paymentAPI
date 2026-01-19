@@ -172,15 +172,57 @@ class LocalDatabase {
     }
 
     async getUser(uid) {
-        return await this.db.get('SELECT * FROM users WHERE uid = ?', uid);
+        let user = await this.db.get('SELECT * FROM users WHERE uid = ?', uid);
+        
+        // Lazy Daily Reset Logic
+        if (user) {
+            const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+            const lastReset = user.lastDailyReset ? user.lastDailyReset.split('T')[0] : null;
+
+            if (lastReset !== today) {
+                // It's a new day!
+                if (user.credits < 3) {
+                    console.log(`[DailyReward] Resetting user ${uid} to 3 credits.`);
+                    await this.db.run(`
+                        UPDATE users 
+                        SET credits = 3, lastDailyReset = ? 
+                        WHERE uid = ?
+                    `, [new Date().toISOString(), uid]);
+                    
+                    // Fetch updated user
+                    user = await this.db.get('SELECT * FROM users WHERE uid = ?', uid);
+                } else {
+                     // Just update the date tracker so we don't check again today needed? 
+                     // Actually, if credits >= 3, we don't give free ones, but we should mark today as checked 
+                     // so we don't re-eval if they drop below 3 later today?
+                     // "Reset to 3 daily" usually implies "If you start the day with 0, you get 3". 
+                     // If you have 5 paid credits, you don't get free ones.
+                     
+                     // Let's explicitly update the timestamp to TODAY so we know we processed them.
+                     await this.db.run(`UPDATE users SET lastDailyReset = ? WHERE uid = ?`, [new Date().toISOString(), uid]);
+                     user.lastDailyReset = new Date().toISOString();
+                }
+            }
+        } else {
+             // Create new user with default 3 credits (First day bonus)
+             const now = new Date().toISOString();
+             await this.db.run(`
+                INSERT INTO users (uid, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef) 
+                VALUES (?, 3, NULL, ?, 'INIT_BONUS')
+             `, [uid, now]);
+             user = { uid, credits: 3, unlimitedExpiresAt: null, lastDailyReset: now, lastPaymentRef: 'INIT_BONUS' };
+        }
+
+        return user;
     }
 
     async updateUserCredits(uid, creditsToAdd, isUnlimited, txnRef) {
         // Upsert User
-        const user = await this.getUser(uid);
+        let user = await this.db.get('SELECT * FROM users WHERE uid = ?', uid); // Don't use this.getUser to avoid recursive reset checks if possible, though harmless
         
         let newCredits = (user ? user.credits : 0);
         let unlimitedExpires = (user ? user.unlimitedExpiresAt : null);
+        let lastDailyReset = (user ? user.lastDailyReset : new Date().toISOString());
 
         if (isUnlimited) {
             const date = new Date();
@@ -192,18 +234,19 @@ class LocalDatabase {
 
         if (user) {
             await this.db.run(`
-                UPDATE users SET credits = ?, unlimitedExpiresAt = ?, lastPaymentRef = ? WHERE uid = ?
-            `, [newCredits, unlimitedExpires, txnRef, uid]);
+                UPDATE users SET credits = ?, unlimitedExpiresAt = ?, lastDailyReset = ?, lastPaymentRef = ? WHERE uid = ?
+            `, [newCredits, unlimitedExpires, lastDailyReset, txnRef, uid]);
         } else {
              await this.db.run(`
-                INSERT INTO users (uid, credits, unlimitedExpiresAt, lastPaymentRef) VALUES (?, ?, ?, ?)
-            `, [uid, newCredits, unlimitedExpires, txnRef]);
+                INSERT INTO users (uid, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef) VALUES (?, ?, ?, ?, ?)
+            `, [uid, newCredits, unlimitedExpires, lastDailyReset, txnRef]);
         }
 
         // Sync Queue
         await this.addToSyncQueue('users', uid, 'update', { 
             credits: newCredits, 
             unlimitedExpiresAt: unlimitedExpires,
+            lastDailyReset,
             lastPaymentRef: txnRef 
         }); // Note: 'update' op works for upsert in Firestore if we use set merge:true
     }
