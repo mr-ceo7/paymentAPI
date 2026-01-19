@@ -31,18 +31,29 @@ app.use(helmet({
     contentSecurityPolicy: {
         directives: {
             defaultSrc: ["'self'"],
-            scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com", "https://unpkg.com"],
+            scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.tailwindcss.com", "https://unpkg.com", "https://cdn.jsdelivr.net", "https://fonts.googleapis.com"],
             imgSrc: ["'self'", "data:", "https:"],
-            styleSrc: ["'self'", "'unsafe-inline'", "https:"],
-            connectSrc: ["'self'", "https:"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https:", "https://fonts.googleapis.com"],
+            fontSrc: ["'self'", "https://fonts.gstatic.com"],
+            connectSrc: ["'self'", "https:", "wss:"],
         },
     },
 })); 
 app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
+
 // CORS: Allow requests from frontend
 app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
 
 const PORT = process.env.PORT || 5000;
+
+// ... (Firebase Init Code remains same, skipping for brevity in this replace block if it was outside target range, but here I am targeting start of file effectively or just ensuring I don't delete it.
+// Actually, I should probably do multiple chunks if I need to touch multiple places.
+// The user instruction says "Update server.js".
+// Let's use multi_replace for safety as edits are scattered.)
+
+// RE-STRATEGIZING: switching to multi_replace because changes are scattered.
+
 
 // Initialize Firebase Admin
 try {
@@ -157,8 +168,11 @@ app.post('/api/pay', async (req, res) => {
         res.json({ 
             success: true, 
             message: "STK Push Sent", 
-            checkoutRequestID: checkoutReqId 
         });
+
+        // Broadcast Stats Update
+        broadcastStats();
+
 
     } catch (error) {
         console.error("Payment Init Error:", error.message);
@@ -319,6 +333,7 @@ app.post('/api/manual-pay', async (req, res) => {
             });
             
             res.json({ success: true, transactionId: docRef.id, message: "Verification in progress" });
+            broadcastStats();
             return;
         } else {
              console.log(`[MOCK DB] Manual Pay: ${uniqueCode} for ${planId}`);
@@ -343,6 +358,7 @@ app.post('/api/manual-pay', async (req, res) => {
             });
              
              res.json({ success: true, transactionId: mockId, message: "Verification in progress" });
+             broadcastStats();
         }
 
     } catch (error) {
@@ -518,255 +534,70 @@ app.post('/api/verify-result', async (req, res) => {
 
 // --- DASHBOARD ENDPOINTS ---
 
-app.get('/api/dashboard/stats', async (req, res) => {
-    const isConnected = (Date.now() - lastAppHeartbeat) < 8000; // < 8 seconds considered online (poll is 2s)
+// Shared Stats Logic
+async function getStatsData() {
+    const isConnected = (Date.now() - lastAppHeartbeat) < 8000;
     
     let stats = {
         verified: 0,
         rejected: 0,
         pending: 0,
         revenue: 0,
-        isPhoneConnected: isConnected
+        isPhoneConnected: isConnected,
+        recentTransactions: []
     };
 
+    if (db) {
+        const snapshot = await db.collection('transactions').get();
+        const txns = [];
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            txns.push({
+                id: doc.id,
+                ...data,
+                date: (data.createdAt && data.createdAt.toDate) ? data.createdAt.toDate() : new Date()
+            });
+            
+            if (data.status === 'COMPLETED') {
+                stats.verified++;
+                stats.revenue += (data.amount || 0);
+            } else if (data.status === 'FAILED') {
+                stats.rejected++;
+            } else if (data.status === 'MANUAL_VERIFYING' || data.status === 'PENDING') {
+                stats.pending++;
+            }
+        });
+        
+        // Sort and slice for recent
+        stats.recentTransactions = txns.sort((a,b) => b.date - a.date).slice(0, 10);
+        
+    } else {
+        // Mock Stats
+        const txns = Array.from(mockTransactions.values());
+        txns.forEach(t => {
+            if (t.status === 'COMPLETED') {
+                stats.verified++;
+                stats.revenue += (t.amount || 0);
+            } else if (t.status === 'FAILED') stats.rejected++;
+            else if (t.status === 'MANUAL_VERIFYING' || t.status === 'PENDING') stats.pending++;
+        });
+        stats.recentTransactions = txns.sort((a,b) => b.createdAt - a.createdAt).slice(0, 10);
+    }
+    return stats;
+}
+
+app.get('/api/dashboard/stats', async (req, res) => {
     try {
-        if (db) {
-            const snapshot = await db.collection('transactions').get();
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                if (data.status === 'COMPLETED') {
-                    stats.verified++;
-                    stats.revenue += (data.amount || 0);
-                } else if (data.status === 'FAILED') {
-                    stats.rejected++;
-                } else if (data.status === 'MANUAL_VERIFYING') {
-                    stats.pending++;
-                }
-            });
-        } else {
-            // Mock Stats
-            console.log('[Dashboard] Using mock stats, mockTransactions count:', mockTransactions.size);
-            mockTransactions.forEach(t => {
-                if (t.status === 'COMPLETED') {
-                    stats.verified++;
-                    stats.revenue += (t.amount || 0);
-                } else if (t.status === 'FAILED') stats.rejected++;
-                else if (t.status === 'MANUAL_VERIFYING') stats.pending++;
-            });
-        }
-        console.log('[Dashboard] Stats:', stats);
+        const stats = await getStatsData();
         res.json(stats);
     } catch (e) {
-        console.error("Dashboard Stats Error DETAILS:", e);
-        console.error("Error stack:", e.stack);
-        // Always return valid stats structure even on error
-        res.status(200).json({
-            verified: 0,
-            rejected: 0,
-            pending: 0,
-            revenue: 0,
-            isPhoneConnected: false,
-            error: e.message
-        });
+        console.error("Dashboard Stats Error:", e);
+        res.status(500).json({ error: e.message });
     }
 });
 
 app.get('/dashboard', (req, res) => {
-    const html = `
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Payment Dashboard</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <script src="https://unpkg.com/lucide@latest"></script>
-        <style>
-            .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
-        </style>
-    </head>
-    <body class="bg-gray-900 text-white min-h-screen p-8 font-sans">
-        <div class="max-w-5xl mx-auto space-y-8">
-            <header class="flex justify-between items-center bg-gray-800/50 p-6 rounded-2xl glass">
-                <div>
-                    <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">System Dashboard</h1>
-                    <p class="text-gray-400 text-sm">Real-time payment monitoring</p>
-                </div>
-                <div class="flex items-center gap-3 px-4 py-2 rounded-full bg-gray-800 border border-gray-700">
-                    <div id="status-dot" class="w-3 h-3 rounded-full bg-red-500 animate-pulse"></div>
-                    <span id="status-text" class="text-sm font-bold text-red-400">OFFLINE</span>
-                </div>
-            </header>
-
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
-                <!-- Verified -->
-                <div class="glass p-6 rounded-2xl border-l-4 border-green-500">
-                    <div class="flex justify-between items-start">
-                        <div>
-                            <p class="text-gray-400 text-xs font-bold uppercase tracking-widest">Verified</p>
-                            <h2 id="val-verified" class="text-4xl font-black mt-2">0</h2>
-                        </div>
-                        <i data-lucide="check-circle" class="text-green-500 w-8 h-8"></i>
-                    </div>
-                </div>
-
-                <!-- Rejected -->
-                <div class="glass p-6 rounded-2xl border-l-4 border-red-500">
-                    <div class="flex justify-between items-start">
-                        <div>
-                            <p class="text-gray-400 text-xs font-bold uppercase tracking-widest">Rejected</p>
-                            <h2 id="val-rejected" class="text-4xl font-black mt-2">0</h2>
-                        </div>
-                        <i data-lucide="x-circle" class="text-red-500 w-8 h-8"></i>
-                    </div>
-                </div>
-
-                <!-- Pending -->
-                <div class="glass p-6 rounded-2xl border-l-4 border-yellow-500">
-                    <div class="flex justify-between items-start">
-                        <div>
-                            <p class="text-gray-400 text-xs font-bold uppercase tracking-widest">Pending</p>
-                            <h2 id="val-pending" class="text-4xl font-black mt-2">0</h2>
-                        </div>
-                        <i data-lucide="clock" class="text-yellow-500 w-8 h-8"></i>
-                    </div>
-                </div>
-
-                <!-- Revenue -->
-                <div class="glass p-6 rounded-2xl border-l-4 border-blue-500 bg-gradient-to-br from-blue-900/20 to-transparent">
-                    <div class="flex justify-between items-start">
-                        <div>
-                            <p class="text-blue-300 text-xs font-bold uppercase tracking-widest">Total Revenue</p>
-                            <h2 class="text-4xl font-black mt-2 flex items-baseline gap-1">
-                                <span class="text-lg text-gray-400">KES</span>
-                                <span id="val-revenue">0</span>
-                            </h2>
-                        </div>
-                        <i data-lucide="wallet" class="text-blue-500 w-8 h-8"></i>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Action Buttons -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-8">
-                <button id="clear-stats-btn" class="glass p-4 rounded-xl border border-red-500/50 hover:bg-red-500/10 transition-all flex items-center justify-center gap-3 group">
-                    <i data-lucide="trash-2" class="text-red-400 w-5 h-5 group-hover:scale-110 transition-transform"></i>
-                    <span class="text-red-400 font-bold">Clear All Stats</span>
-                </button>
-                
-                <a href="/api/download/app" class="glass p-4 rounded-xl border border-blue-500/50 hover:bg-blue-500/10 transition-all flex items-center justify-center gap-3 group">
-                    <i data-lucide="download" class="text-blue-400 w-5 h-5 group-hover:scale-110 transition-transform"></i>
-                    <span class="text-blue-400 font-bold">Download Android App</span>
-                </a>
-            </div>
-
-            <!-- Live Logs -->
-            <div class="glass p-6 rounded-2xl mt-8">
-                <div class="flex items-center gap-3 mb-4">
-                    <i data-lucide="terminal" class="text-emerald-400 w-6 h-6"></i>
-                    <h3 class="text-xl font-bold text-emerald-400">Live Server Logs</h3>
-                </div>
-                <div id="logs-container" class="bg-black/50 rounded-lg p-4 h-64 overflow-y-auto font-mono text-xs text-gray-300 space-y-1">
-                    <div class="text-gray-500 italic">Connecting to log stream...</div>
-                </div>
-            </div>
-            
-            <div class="text-center text-gray-500 text-xs mt-6">
-                Auto-refreshes every 2 seconds
-            </div>
-        </div>
-
-        <script>
-            lucide.createIcons();
-
-            async function fetchStats() {
-                try {
-                    const res = await fetch('/api/dashboard/stats');
-                    const data = await res.json();
-                    
-                    // Update Values
-                    document.getElementById('val-verified').textContent = data.verified;
-                    document.getElementById('val-rejected').textContent = data.rejected;
-                    document.getElementById('val-pending').textContent = data.pending;
-                    document.getElementById('val-revenue').textContent = data.revenue.toLocaleString();
-                    
-                    // Update Connection Status
-                    const dot = document.getElementById('status-dot');
-                    const text = document.getElementById('status-text');
-                    
-                    if (data.isPhoneConnected) {
-                        dot.className = "w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_10px_#10b981]";
-                        text.className = "text-sm font-bold text-emerald-400";
-                        text.textContent = "PHONE CONNECTED";
-                    } else {
-                        dot.className = "w-3 h-3 rounded-full bg-red-500 animate-pulse";
-                        text.className = "text-sm font-bold text-red-500";
-                        text.textContent = "PHONE DISCONNECTED";
-                    }
-
-                } catch (e) {
-                    console.error("Stats fail", e);
-                }
-            }
-
-            fetchStats();
-            setInterval(fetchStats, 2000);
-
-            // Clear Stats Function
-            async function clearStats() {
-                if (!confirm('Are you sure you want to clear ALL transaction stats? This cannot be undone.')) return;
-                
-                try {
-                    const res = await fetch('/api/dashboard/clear-stats', { method: 'POST' });
-                    const data = await res.json();
-                    if (data.success) {
-                        alert('Successfully cleared ' + data.deleted + ' transactions');
-                        fetchStats(); // Refresh stats
-                    }
-                } catch (e) {
-                    alert('Failed to clear stats: ' + e.message);
-                }
-            }
-
-            // Connect to Live Logs
-            function connectLogs() {
-                const logsContainer = document.getElementById('logs-container');
-                const eventSource = new EventSource('/api/dashboard/logs');
-                
-                logsContainer.innerHTML = '<div class="text-emerald-400">Connected to log stream</div>';
-                
-                eventSource.onmessage = (event) => {
-                    const log = JSON.parse(event.data);
-                    const time = new Date(log.timestamp).toLocaleTimeString();
-                    const logLine = document.createElement('div');
-                    logLine.className = 'text-gray-300';
-                    logLine.innerHTML = '<span class="text-gray-500">[' + time + ']</span> ' + log.message;
-                    logsContainer.appendChild(logLine);
-                    
-                    // Auto-scroll to bottom
-                    logsContainer.scrollTop = logsContainer.scrollHeight;
-                    
-                    // Keep only last 50 logs
-                    while (logsContainer.children.length > 50) {
-                        logsContainer.removeChild(logsContainer.firstChild);
-                    }
-                };
-                
-                eventSource.onerror = () => {
-                    logsContainer.innerHTML = '<div class="text-red-400">Disconnected. Reconnecting...</div>';
-                    setTimeout(connectLogs, 3000);
-                };
-            }
-
-            // Attach Event Listener
-            document.getElementById('clear-stats-btn').addEventListener('click', clearStats);
-
-            connectLogs();
-        </script>
-    </body>
-    </html>
-    `;
-    res.send(html);
+    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
 // --- BACKGROUND TASKS ---
@@ -836,6 +667,7 @@ app.post('/api/dashboard/clear-stats', async (req, res) => {
             mockTransactions.clear();
             res.json({ success: true, deleted: count });
         }
+        broadcastStats(); // Update clients
     } catch (e) {
         console.error("[Dashboard] Clear stats error:", e);
         res.status(500).json({ error: "Failed to clear stats" });
@@ -857,6 +689,8 @@ console.log = (...args) => {
     logBuffer.push({ timestamp, message });
     if (logBuffer.length > MAX_LOG_BUFFER) logBuffer.shift();
     originalLog.apply(console, args);
+    // Emit Log to Dashboard
+    if(io) io.emit('server_log', { timestamp, message }); 
 };
 
 app.get('/api/dashboard/logs', (req, res) => {

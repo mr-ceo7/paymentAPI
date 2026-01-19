@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UoN Smart Backend | Mission Control</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Charts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Socket.IO -->
+    <script src="/socket.io/socket.io.js"></script>
+
+    <style>
+        body { font-family: 'Outfit', sans-serif; background-color: #0f172a; }
+        .glass { 
+            background: rgba(255, 255, 255, 0.03); 
+            backdrop-filter: blur(16px); 
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08); 
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+        .glass-card:hover {
+            background: rgba(255, 255, 255, 0.06);
+            border-color: rgba(255, 255, 255, 0.15);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+        .glass-input {
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .text-glow { text-shadow: 0 0 20px rgba(59, 130, 246, 0.5); }
+        
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+        .blob {
+            position: absolute;
+            filter: blur(80px);
+            z-index: -1;
+            opacity: 0.4;
+            animation: float 10s ease-in-out infinite;
+        }
+        @keyframes float {
+            0% { transform: translate(0, 0) scale(1); }
+            33% { transform: translate(30px, -50px) scale(1.1); }
+            66% { transform: translate(-20px, 20px) scale(0.9); }
+            100% { transform: translate(0, 0) scale(1); }
+        }
+    </style>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: { 500: '#3b82f6', 600: '#2563eb' }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="text-white min-h-screen overflow-hidden flex flex-col relative px-4 py-6 md:p-8">
+
+    <!-- Ambient Background -->
+    <div class="blob bg-blue-600 w-96 h-96 top-0 left-0 rounded-full mix-blend-screen"></div>
+    <div class="blob bg-purple-600 w-96 h-96 bottom-0 right-0 rounded-full mix-blend-screen animation-delay-2000"></div>
+
+    <!-- Header -->
+    <header class="flex flex-col md:flex-row justify-between items-center mb-8 glass p-6 rounded-2xl relative overflow-hidden">
+        <div class="absolute inset-0 bg-gradient-to-r from-blue-500/10 to-purple-500/10 pointer-events-none"></div>
+        
+        <div class="flex items-center gap-4 z-10">
+            <div class="p-3 bg-brand-500/20 rounded-xl border border-brand-500/50 shadow-[0_0_15px_rgba(59,130,246,0.5)]">
+                <i data-lucide="activity" class="text-brand-500 w-6 h-6"></i>
+            </div>
+            <div>
+                <h1 class="text-2xl font-bold tracking-tight">Mission Control</h1>
+                <p class="text-gray-400 text-sm">Mainnet Status: <span class="text-emerald-400 font-mono">ONLINE</span></p>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-4 mt-4 md:mt-0 z-10">
+            <div class="px-4 py-2 glass rounded-full flex items-center gap-2">
+                <div id="socket-dot" class="w-2 h-2 rounded-full bg-red-500"></div>
+                <span id="socket-status" class="text-xs font-bold tracking-wider text-gray-400">CONNECTING...</span>
+            </div>
+            <button id="refresh-btn" class="p-2 glass rounded-lg hover:bg-white/10 transition-colors">
+                <i data-lucide="refresh-cw" class="w-5 h-5 text-gray-300"></i>
+            </button>
+             <button id="clear-stats-btn" class="p-2 glass rounded-lg hover:bg-red-500/20 border-red-500/30 transition-colors group" title="Clear All Data">
+                <i data-lucide="trash-2" class="w-5 h-5 text-red-400 group-hover:text-red-300"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Grid -->
+    <div class="grid grid-cols-12 gap-6 flex-1 min-h-0">
+        
+        <!-- Left Column: Metrics & Charts (8 cols) -->
+        <div class="col-span-12 lg:col-span-8 flex flex-col gap-6 overflow-y-auto pr-2 pb-20">
+            
+            <!-- Quick Stats Row -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <!-- Revenue -->
+                <div class="glass glass-card p-5 rounded-2xl relative overflow-hidden group">
+                    <div class="absolute -right-6 -bottom-6 text-brand-500/10 group-hover:text-brand-500/20 transition-colors">
+                        <i data-lucide="wallet" class="w-32 h-32"></i>
+                    </div>
+                    <p class="text-gray-400 text-xs font-medium uppercase tracking-wider mb-1">Total Revenue</p>
+                    <h3 class="text-3xl font-bold flex items-baseline gap-1">
+                        <span class="text-sm text-gray-500 font-normal">KES</span>
+                        <span id="stat-revenue" class="text-glow">0</span>
+                    </h3>
+                    <div class="mt-2 text-xs text-emerald-400 flex items-center gap-1">
+                        <i data-lucide="trending-up" class="w-3 h-3"></i>
+                        <span>Live</span>
+                    </div>
+                </div>
+
+                <!-- Verified -->
+                <div class="glass glass-card p-5 rounded-2xl border-l-4 border-emerald-500">
+                    <p class="text-gray-400 text-xs font-medium uppercase tracking-wider mb-1">Verified</p>
+                    <h3 id="stat-verified" class="text-3xl font-bold text-emerald-400">0</h3>
+                </div>
+
+                <!-- Pending -->
+                <div class="glass glass-card p-5 rounded-2xl border-l-4 border-amber-500">
+                    <p class="text-gray-400 text-xs font-medium uppercase tracking-wider mb-1">Pending</p>
+                    <h3 id="stat-pending" class="text-3xl font-bold text-amber-500">0</h3>
+                </div>
+
+                 <!-- Rejected -->
+                 <div class="glass glass-card p-5 rounded-2xl border-l-4 border-red-500">
+                    <p class="text-gray-400 text-xs font-medium uppercase tracking-wider mb-1">Rejected</p>
+                    <h3 id="stat-rejected" class="text-3xl font-bold text-red-500">0</h3>
+                </div>
+            </div>
+
+            <!-- Charts Section -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="glass p-6 rounded-2xl">
+                    <h3 class="text-sm font-semibold text-gray-300 mb-4 flex items-center gap-2">
+                        <i data-lucide="pie-chart" class="w-4 h-4 text-brand-500"></i> Usage Breakdown
+                    </h3>
+                    <div class="h-64 flex items-center justify-center">
+                        <canvas id="statusChart"></canvas>
+                    </div>
+                </div>
+                <div class="glass p-6 rounded-2xl">
+                     <h3 class="text-sm font-semibold text-gray-300 mb-4 flex items-center gap-2">
+                        <i data-lucide="bar-chart-2" class="w-4 h-4 text-brand-500"></i> Revenue Trend
+                    </h3>
+                    <div class="h-64">
+                         <canvas id="revenueChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+             <!-- Recent Transactions -->
+             <div class="glass p-6 rounded-2xl">
+                <h3 class="text-sm font-semibold text-gray-300 mb-4 flex items-center gap-2">
+                    <i data-lucide="list" class="w-4 h-4 text-brand-500"></i> Recent Activity
+                </h3>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm text-left">
+                        <thead class="text-xs text-gray-500 uppercase bg-white/5">
+                            <tr>
+                                <th class="px-4 py-3 rounded-l-lg">Time</th>
+                                <th class="px-4 py-3">User</th>
+                                <th class="px-4 py-3">Plan</th>
+                                <th class="px-4 py-3 text-right">Amount</th>
+                                <th class="px-4 py-3 text-center rounded-r-lg">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recent-txns-body" class="divide-y divide-gray-700/50">
+                            <tr><td colspan="5" class="py-4 text-center text-gray-500">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Right Column: Logs & Control (4 cols) -->
+        <div class="col-span-12 lg:col-span-4 flex flex-col gap-6 h-full min-h-[500px]">
+            <!-- Live Logs -->
+            <div class="glass rounded-2xl flex flex-col h-full overflow-hidden">
+                <div class="p-4 border-b border-gray-700/50 bg-black/20 flex justify-between items-center">
+                    <h3 class="font-mono text-sm text-brand-400 flex items-center gap-2">
+                        <i data-lucide="terminal-square" class="w-4 h-4"></i> ./server.log
+                    </h3>
+                    <div class="flex gap-2">
+                        <span class="w-2 h-2 rounded-full bg-red-500"></span>
+                        <span class="w-2 h-2 rounded-full bg-yellow-500"></span>
+                        <span class="w-2 h-2 rounded-full bg-green-500"></span>
+                    </div>
+                </div>
+                <div id="logs-container" class="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-2 bg-black/40 text-gray-300 scroll-smooth">
+                    <div class="text-gray-500 opacity-50">Log stream initialized...</div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Modals / Toasts (Optional placeholder) -->
+    <div id="toast-container" class="fixed bottom-8 right-8 flex flex-col gap-2 z-50 pointer-events-none"></div>
+
+    <script>
+        // --- UI Setup ---
+        lucide.createIcons();
+
+        // --- Socket.IO ---
+        const socket = io();
+        const logsContainer = document.getElementById('logs-container');
+        
+        // --- Chart Config ---
+        Chart.defaults.color = '#94a3b8';
+        Chart.defaults.borderColor = 'rgba(255,255,255,0.05)';
+        
+        const statusCtx = document.getElementById('statusChart').getContext('2d');
+        const statusChart = new Chart(statusCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['Verified', 'Rejected', 'Pending'],
+                datasets: [{
+                    data: [0, 0, 0],
+                    backgroundColor: ['#10b981', '#ef4444', '#f59e0b'],
+                    borderWidth: 0,
+                    hoverOffset: 4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom', labels: { padding: 20, usePointStyle: true } } },
+                cutout: '70%'
+            }
+        });
+
+        // Revenue chart (Simulated history for now, will visualize real data if available)
+        const revCtx = document.getElementById('revenueChart').getContext('2d');
+        const revenueChart = new Chart(revCtx, {
+            type: 'line',
+            data: {
+                labels: Array(10).fill(''),
+                datasets: [{
+                    label: 'Revenue Stream',
+                    data: Array(10).fill(0),
+                    borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: { y: { beginAtZero: true, display: false }, x: { display: false } },
+                plugins: { legend: { display: false } }
+            }
+        });
+
+        // --- Event Listeners ---
+        socket.on('connect', () => {
+             updateSocketStatus(true);
+             appendLog('System', 'Connected to real-time stream', 'success');
+        });
+
+        socket.on('disconnect', () => {
+            updateSocketStatus(false);
+            appendLog('System', 'Lost connection to server', 'error');
+        });
+
+        socket.on('dashboard_stats', (data) => {
+            updateDashboard(data);
+        });
+
+        socket.on('new_transaction', (txn) => {
+            appendLog('Txn', `New Transaction: ${txn.planId} - ${txn.status}`, 'info');
+            // Optimistic update could go here
+            showToast(`New Transaction: ${txn.amount} KES` );
+        });
+        
+        socket.on('server_log', (log) => {
+             appendLog('Server', log.message, 'default');
+        });
+
+        // --- Functions ---
+        function updateSocketStatus(connected) {
+            const dot = document.getElementById('socket-dot');
+            const text = document.getElementById('socket-status');
+            if(connected) {
+                dot.classList.remove('bg-red-500');
+                dot.classList.add('bg-emerald-500', 'shadow-[0_0_10px_#10b981]');
+                text.textContent = 'LIVE FEED';
+                text.classList.add('text-emerald-400');
+                text.classList.remove('text-gray-400');
+            } else {
+                dot.classList.add('bg-red-500');
+                dot.classList.remove('bg-emerald-500', 'shadow-[0_0_10px_#10b981]');
+                text.textContent = 'OFFLINE';
+                 text.classList.remove('text-emerald-400');
+                text.classList.add('text-gray-400');
+            }
+        }
+
+        function appendLog(source, msg, type) {
+            const div = document.createElement('div');
+            const time = new Date().toLocaleTimeString();
+            let colorClass = 'text-gray-300';
+            if(type === 'error') colorClass = 'text-red-400';
+            if(type === 'success') colorClass = 'text-emerald-400';
+            
+            div.className = `${colorClass} text-xs border-l-2 border-transparent pl-2 hover:bg-white/5 transition-colors`;
+            if(type === 'error') div.classList.add('border-red-500');
+            
+            // Clean msg if it's an object string
+            if(typeof msg === 'string' && msg.startsWith('{')) msg = '[JSON Data]';
+
+            div.innerHTML = `<span class="opacity-50">[${time}]</span> <span class="font-bold text-gray-500">${source}:</span> ${msg}`;
+            logsContainer.appendChild(div);
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+            
+            if(logsContainer.children.length > 100) logsContainer.removeChild(logsContainer.firstChild);
+        }
+
+        function updateDashboard(data) {
+            // Numbers
+            animateValue('stat-verified', parseInt(document.getElementById('stat-verified').textContent), data.verified);
+            animateValue('stat-rejected', parseInt(document.getElementById('stat-rejected').textContent), data.rejected);
+            animateValue('stat-pending', parseInt(document.getElementById('stat-pending').textContent), data.pending);
+            animateValue('stat-revenue', parseInt(document.getElementById('stat-revenue').textContent.replace(/,/g,'')), data.revenue);
+
+            // Chart
+            statusChart.data.datasets[0].data = [data.verified, data.rejected, data.pending];
+            statusChart.update();
+            
+            // Revenue Chart (Shift and push)
+            // Ideally we'd have historical data, for now just pushing current total to show "movement" or random variation if we had live streams
+            // For a cumulative chart, it should just rise.
+            // Let's just create a slight jitter effect for visual "aliveness" or push the new total
+            const revData = revenueChart.data.datasets[0].data;
+            revData.shift();
+            revData.push(data.revenue);
+            revenueChart.update();
+
+            // Table
+            if(data.recentTransactions) {
+                renderTable(data.recentTransactions);
+            }
+        }
+        
+        function renderTable(txns) {
+            const tbody = document.getElementById('recent-txns-body');
+            if(!txns || txns.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="py-4 text-center text-gray-500 italic">No recent transactions</td></tr>`;
+                return;
+            }
+            
+            tbody.innerHTML = txns.map(t => `
+                <tr class="hover:bg-white/5 transition-colors">
+                    <td class="px-4 py-3 text-gray-400">${new Date(t.date).toLocaleTimeString()}</td>
+                    <td class="px-4 py-3 font-medium text-white">${t.uid?.substring(0,6) || 'Anon'}...</td>
+                    <td class="px-4 py-3 text-gray-300 capitalize">${t.planId}</td>
+                    <td class="px-4 py-3 text-right font-mono text-gray-300">${t.amount}</td>
+                    <td class="px-4 py-3 text-center">
+                        <span class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${getStatusColor(t.status)}">
+                            ${t.status}
+                        </span>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function getStatusColor(status) {
+            if(status === 'COMPLETED' || status === 'Success') return 'bg-emerald-500/20 text-emerald-400';
+            if(status === 'FAILED') return 'bg-red-500/20 text-red-400';
+            if(status === 'PENDING' || status === 'MANUAL_VERIFYING') return 'bg-amber-500/20 text-amber-400';
+            return 'bg-gray-500/20 text-gray-400';
+        }
+
+        function animateValue(id, start, end) {
+            if (start === end) return;
+            const obj = document.getElementById(id);
+            const range = end - start;
+            const duration = 1000;
+            let startTime = null;
+            
+            function step(timestamp) {
+                if (!startTime) startTime = timestamp;
+                const progress = Math.min((timestamp - startTime) / duration, 1);
+                obj.textContent = Math.floor(progress * (end - start) + start).toLocaleString();
+                if (progress < 1) {
+                    window.requestAnimationFrame(step);
+                } else {
+                     obj.textContent = end.toLocaleString();
+                }
+            }
+            window.requestAnimationFrame(step);
+        }
+
+        function showToast(msg) {
+            const container = document.getElementById('toast-container');
+            const el = document.createElement('div');
+            el.className = 'glass p-4 rounded-xl border-l-4 border-brand-500 text-sm font-medium animate-slide-in';
+            el.textContent = msg;
+            container.appendChild(el);
+            setTimeout(() => el.remove(), 4000);
+        }
+
+        // --- Init ---
+        document.getElementById('refresh-btn').addEventListener('click', () => {
+             socket.emit('request_stats');
+             this.querySelector('i').classList.add('animate-spin');
+             setTimeout(() => this.querySelector('i').classList.remove('animate-spin'), 1000);
+        });
+
+        document.getElementById('clear-stats-btn').addEventListener('click', async () => {
+             if(!confirm("Are you sure? This wipes all transaction data.")) return;
+             try {
+                const res = await fetch('/api/dashboard/clear-stats', { method: 'POST' });
+                const json = await res.json();
+                if(json.success) showToast(`Cleared ${json.deleted} records.`);
+             } catch(e) { console.error(e); }
+        });
+
+        // Initial Data Fetch
+        fetch('/api/dashboard/stats').then(r=>r.json()).then(updateDashboard);
+
+    </script>
+    
+    <style>
+        .animate-slide-in { animation: slideIn 0.3s ease-out forwards; }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    </style>
+</body>
+</html>
