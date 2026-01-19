@@ -8,6 +8,8 @@ const http = require('http');
 const { Server } = require("socket.io");
 const path = require('path');
 const fs = require('fs');
+const LocalDB = require('./database');
+const SyncService = require('./services/sync');
 
 dotenv.config();
 
@@ -72,8 +74,25 @@ try {
 
 const db = admin.apps.length > 0 ? admin.firestore() : null;
 
-if (!db) {
-    console.warn("⚠️ RUNNING IN OFFLINE/MOCK MODE (No Firebase Creds)");
+
+// Initialize Local DB & Sync
+(async () => {
+    try {
+        await LocalDB.init();
+        if (db) SyncService.start(db);
+    } catch (e) {
+        console.error("Failed to init LocalDB:", e);
+    }
+})();
+
+// Helper: Broadcast Stats to Dashboard
+async function broadcastStats() {
+    try {
+        const stats = await getStatsData(); // reused existing helper which uses LocalDB
+        io.emit('dashboard_stats', stats);
+    } catch (e) {
+        console.error("Broadcast Stats Error:", e);
+    }
 }
 
 // Lipana Config
@@ -151,19 +170,16 @@ app.post('/api/pay', async (req, res) => {
 
         if (!checkoutReqId) throw new Error("No CheckoutRequestID from Lipana");
 
-        // Save Transaction
-        if (db) {
-            await db.collection('transactions').doc(checkoutReqId).set({
-                uid,
-                planId,
-                amount: plan.price,
-                phone,
-                status: 'PENDING',
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-        } else {
-             console.log(`[MOCK DB] Saved transaction ${checkoutReqId} - PENDING`);
-        }
+        // Save Transaction Locally (Syncs to Cloud automatically)
+        await LocalDB.createTransaction({
+            id: checkoutReqId,
+            uid,
+            planId,
+            amount: plan.price,
+            phone,
+            status: 'PENDING',
+            createdAt: new Date().toISOString()
+        });
 
         res.json({ 
             success: true, 
@@ -217,7 +233,7 @@ app.get('/api/payment-status', (req, res) => {
 });
 
 // MOCK DB (In-Memory)
-const mockTransactions = new Map();
+// 2. Webhook Callback
 
 // 2. Webhook Callback
 app.post('/api/callback', async (req, res) => {
@@ -229,46 +245,32 @@ app.post('/api/callback', async (req, res) => {
 
         if (!checkoutRequestID) return res.sendStatus(400);
 
-        if (!db) {
-             console.log(`[MOCK DB] processing callback for ${checkoutRequestID}`);
-             return res.sendStatus(200);
-        }
-
-        const txnRef = db.collection('transactions').doc(checkoutRequestID);
-        const txnDoc = await txnRef.get();
-
-        if (!txnDoc.exists) {
+        const txn = await LocalDB.getTransaction(checkoutRequestID);
+        if (!txn) {
             console.error("Transaction not found:", checkoutRequestID);
             return res.sendStatus(404);
         }
 
-        const txnData = txnDoc.data();
-        if (txnData.status === 'COMPLETED') return res.sendStatus(200); // Idempotency
+        if (txn.status === 'COMPLETED') return res.sendStatus(200);
 
         if (status === 'Success' || status === 'Completed') {
-            const plan = PLANS[txnData.planId];
-            const userRef = db.collection('users').doc(txnData.uid);
+            const plan = PLANS[txn.planId];
+            
+            // Fulfill Credits & Update Status
+            await LocalDB.updateUserCredits(
+                txn.uid, 
+                plan.credits, 
+                txn.planId === 'unlimited', 
+                checkoutRequestID
+            );
 
-            // Fulfill Credits
-            if (txnData.planId === 'unlimited') {
-                const expiresAt = new Date();
-                expiresAt.setDate(expiresAt.getDate() + 30);
-                await userRef.update({
-                    unlimitedExpiresAt: expiresAt.toISOString(),
-                    lastPaymentRef: checkoutRequestID
-                });
-            } else {
-                await userRef.update({
-                    credits: admin.firestore.FieldValue.increment(plan.credits),
-                    lastPaymentRef: checkoutRequestID
-                });
-            }
-
-            // Update Transaction
-            await txnRef.update({ status: 'COMPLETED', confirmedAt: admin.firestore.FieldValue.serverTimestamp() });
-            console.log(`[Fulfillment] User ${txnData.uid} credited.`);
+            await LocalDB.updateTransactionStatus(checkoutRequestID, 'COMPLETED', {
+                verifiedAt: new Date().toISOString()
+            });
+            
+            console.log(`[Fulfillment] User ${txn.uid} credited.`);
         } else {
-            await txnRef.update({ status: 'FAILED' });
+            await LocalDB.updateTransactionStatus(checkoutRequestID, 'FAILED');
         }
 
         res.sendStatus(200);
@@ -299,67 +301,34 @@ app.post('/api/manual-pay', async (req, res) => {
     }
 
     try {
-        if (db) {
-            // Check if code already used
-            const existing = await db.collection('transactions').where('mpesaCode', '==', uniqueCode).get();
-            if (!existing.empty) {
-                // If it exists but failed, maybe allow retry? For now, simplified:
-                // actually, if it exists and is COMPLETED, reject.
-                const isUsed = existing.docs.some(d => d.data().status === 'COMPLETED');
-                if (isUsed) {
-                    return res.status(400).json({ error: 'Transaction code already used' });
-                }
-            }
-
-            // Create Transaction
-            const docRef = db.collection('transactions').doc(); // Auto-ID
-            await docRef.set({
-                uid,
-                planId,
-                amount: plan.price,
-                phone: phone || 'MANUAL',
-                mpesaCode: uniqueCode,
-                status: 'MANUAL_VERIFYING',
-                type: 'MANUAL',
-                createdAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-            console.log(`[Manual Pay] User ${uid} submitted code ${uniqueCode} for ${planId}`);
-            
-            // Emit Socket.IO event to notify mobile app
-            io.emit('request_verification', { 
-                transactionId: docRef.id,
-                mpesaCode: uniqueCode,
-                amount: plan.price
-            });
-            
-            res.json({ success: true, transactionId: docRef.id, message: "Verification in progress" });
-            broadcastStats();
-            return;
-        } else {
-             console.log(`[MOCK DB] Manual Pay: ${uniqueCode} for ${planId}`);
-             const mockId = `mock_txn_${Date.now()}`;
-             mockTransactions.set(mockId, {
-                id: mockId,
-                uid,
-                planId,
-                amount: plan.price,
-                phone: phone || 'MANUAL',
-                mpesaCode: uniqueCode,
-                status: 'MANUAL_VERIFYING',
-                type: 'MANUAL',
-                createdAt: new Date()
-             });
-             
-             // Emit Socket.IO event even in mock mode
-             io.emit('request_verification', { 
-                transactionId: mockId,
-                mpesaCode: uniqueCode,
-                amount: plan.price
-            });
-             
-             res.json({ success: true, transactionId: mockId, message: "Verification in progress" });
-             broadcastStats();
+        // Check for duplicates
+        // Implementation note: getTransactionByCode logic
+        const existing = await LocalDB.getTransactionByCode(uniqueCode);
+        if (existing && existing.status === 'COMPLETED') {
+             return res.status(400).json({ error: 'Transaction code already used' });
         }
+
+        const transactionId = `txn_${Date.now()}`;
+        
+        // Save
+        await LocalDB.createTransaction({
+            id: transactionId,
+            uid,
+            planId,
+            amount: plan.price,
+            phone: phone || 'MANUAL',
+            mpesaCode: uniqueCode,
+            status: 'MANUAL_VERIFYING',
+            type: 'MANUAL',
+            createdAt: new Date().toISOString()
+        });
+
+        console.log(`[Manual Pay] User ${uid} submitted code ${uniqueCode}`);
+
+        io.emit('request_verification', { transactionId, mpesaCode: uniqueCode, amount: plan.price });
+        
+        res.json({ success: true, transactionId, message: "Verification in progress" });
+        broadcastStats();
 
     } catch (error) {
         console.error("Manual Pay Error DETAILS:", error);
@@ -373,18 +342,11 @@ app.post('/api/manual-pay', async (req, res) => {
 // Check Transaction Status (Polling Fallback)
 app.get('/api/transaction-status/:id', async (req, res) => {
     const { id } = req.params;
-    try {
-        if (!db) {
-            // Mock
-            const txn = mockTransactions.get(id);
-            if (!txn) return res.status(404).json({ error: 'Transaction not found' });
-            return res.json({ status: txn.status });
-        }
 
-        const doc = await db.collection('transactions').doc(id).get();
-        if (!doc.exists) return res.status(404).json({ error: 'Transaction not found' });
-        
-        return res.json({ status: doc.data().status });
+    try {
+        const txn = await LocalDB.getTransaction(id);
+        if (!txn) return res.status(404).json({ error: 'Transaction not found' });
+        return res.json({ status: txn.status });
     } catch (e) {
         console.error("Status Poll Error:", e);
         res.status(500).json({ error: 'Poll failed' });
@@ -416,32 +378,15 @@ app.get('/api/payment-status', (req, res) => {
 app.get('/api/pending-verifications', async (req, res) => {
     lastAppHeartbeat = Date.now(); // Update heartbeat
     try {
-        if (!db) {
-            // Return from Mock DB
-            const pending = Array.from(mockTransactions.values())
-                .filter(t => t.status === 'MANUAL_VERIFYING')
-                .map(t => ({
-                    id: t.id,
-                    code: t.mpesaCode,
-                    amount: t.amount,
-                    date: t.createdAt.toISOString()
-                }));
-            return res.json({ pending }); 
-        }
-
-        const snapshot = await db.collection('transactions')
-            .where('status', '==', 'MANUAL_VERIFYING')
-            .limit(50) // Batch size
-            .get();
-
-        const pending = snapshot.docs.map(doc => ({
-            id: doc.id,
-            code: doc.data().mpesaCode,
-            amount: doc.data().amount,
-            date: doc.data().createdAt?.toDate().toISOString() // Optional date check?
+        const pending = await LocalDB.getPendingVerifications();
+        // Format for frontend
+        const formatted = pending.map(t => ({
+            id: t.id,
+            code: t.mpesaCode,
+            amount: t.amount,
+            date: t.createdAt
         }));
-
-        res.json({ pending });
+        res.json({ pending: formatted });
     } catch (error) {
         console.error("Fetch Pending Error:", error);
         res.status(500).json({ error: 'Internal Server Error' });
@@ -457,73 +402,27 @@ app.post('/api/verify-result', async (req, res) => {
     }
 
     try {
-        if (!db) {
-            // Handle Mock DB
-             if (mockTransactions.has(transactionId)) {
-                const txn = mockTransactions.get(transactionId);
-                if (txn.status !== 'MANUAL_VERIFYING') return res.status(400).json({ error: 'Not pending' });
-                
-                if (isValid) {
-                    txn.status = 'COMPLETED';
-                    txn.verifiedAt = new Date();
-                    console.log(`[MOCK DB] Verified ${transactionId}`);
-                } else {
-                    txn.status = 'FAILED';
-                    txn.verifiedAt = new Date();
-                    console.log(`[MOCK DB] Rejected ${transactionId}`);
-                }
-                return res.json({ success: true });
-            }
-            return res.json({ success: true }); // Ignore if not found in mock
-        }
-
-        const txnRef = db.collection('transactions').doc(transactionId);
-        const txnDoc = await txnRef.get();
-
-        if (!txnDoc.exists) {
-            return res.status(404).json({ error: 'Transaction not found' });
-        }
-
-        const txnData = txnDoc.data();
-        if (txnData.status !== 'MANUAL_VERIFYING') {
-            return res.status(400).json({ error: 'Transaction not pending verification' });
-        }
+        const txn = await LocalDB.getTransaction(transactionId);
+        if (!txn) return res.status(404).json({ error: 'Transaction not found' });
+        if (txn.status !== 'MANUAL_VERIFYING') return res.status(400).json({ error: 'Not pending' });
 
         if (isValid) {
-            const plan = PLANS[txnData.planId];
-            const userRef = db.collection('users').doc(txnData.uid);
-
-            // Fulfill
-             if (txnData.planId === 'unlimited') {
-                const expiresAt = new Date();
-                expiresAt.setDate(expiresAt.getDate() + 30);
-                await userRef.update({
-                    unlimitedExpiresAt: expiresAt.toISOString(),
-                    lastPaymentRef: transactionId
-                });
-            } else {
-                await userRef.update({
-                    credits: admin.firestore.FieldValue.increment(plan.credits),
-                    lastPaymentRef: transactionId
-                });
-            }
-
-            await txnRef.update({ 
-                status: 'COMPLETED', 
-                verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-                verificationMetadata: metadata || {} 
+            const plan = PLANS[txn.planId];
+            await LocalDB.updateUserCredits(txn.uid, plan.credits, txn.planId === 'unlimited', transactionId);
+            await LocalDB.updateTransactionStatus(transactionId, 'COMPLETED', {
+                verifiedAt: new Date().toISOString(),
+                verificationMetadata: metadata
             });
             console.log(`[Manual Verify] Validated ${transactionId}`);
         } else {
-             await txnRef.update({ 
-                status: 'FAILED', 
-                verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-                 verificationMetadata: metadata || {} 
+            await LocalDB.updateTransactionStatus(transactionId, 'FAILED', {
+                verifiedAt: new Date().toISOString(),
+                verificationMetadata: metadata
             });
             console.log(`[Manual Verify] Rejected ${transactionId}`);
         }
-
         res.json({ success: true });
+        broadcastStats();
 
     } catch (error) {
         console.error("Verify Result Error:", error);
@@ -531,59 +430,92 @@ app.post('/api/verify-result', async (req, res) => {
     }
 });
 
+// 4. User Credit Management (API for Frontend)
+app.get('/api/user/credits', async (req, res) => {
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ error: 'Missing UID' });
+
+    try {
+        const user = await LocalDB.getUser(uid);
+        if (!user) {
+            // Default for new user
+            return res.json({ credits: 0, isUnlimited: false });
+        }
+
+        // Check Unlimited Expiry
+        let isUnlimited = false;
+        if (user.unlimitedExpiresAt) {
+             if (new Date(user.unlimitedExpiresAt) > new Date()) {
+                 isUnlimited = true;
+             }
+        }
+
+        res.json({ 
+            credits: user.credits || 0, 
+            isUnlimited,
+            unlimitedExpiresAt: user.unlimitedExpiresAt 
+        });
+    } catch (e) {
+        console.error("Get Credits Error:", e);
+        res.status(500).json({ error: 'Failed to fetch credits' });
+    }
+});
+
+app.post('/api/user/consume', async (req, res) => {
+    const { uid } = req.body;
+    if (!uid) return res.status(400).json({ error: 'Missing UID' });
+
+    try {
+        const user = await LocalDB.getUser(uid);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        // Check Unlimited
+        if (user.unlimitedExpiresAt && new Date(user.unlimitedExpiresAt) > new Date()) {
+            return res.json({ success: true, remaining: 9999, message: 'Unlimited Plan Active' });
+        }
+
+        if (user.credits > 0) {
+            const newCredits = user.credits - 1;
+            // Update DB
+            // We need a specific method or just reuse updateUserCredits with logic?
+            // reuse updateUserCredits requires explicit args. Let's make a decrement helper or just use raw SQL here for speed/atomic? 
+            // LocalDB.updateUserCredits is upsert/overwrite.
+            // Let's add specific consume method to LocalDB or just raw sql via db.run
+            // Ideally we stick to LocalDB encapsulation. I'll add consumeCredit to LocalDB for cleaner code or just use upsert with new value.
+            
+            // Re-using updateUserCredits is tricky because it adds. 
+            // Let's implement direct SQL update here since we have the instance if we exported it? 
+            // Better: Add consume method to LocalDB in next step? Or since I'm editing server.js, maybe I can just do a precise update if I had the method.
+            // I'll update LocalDB first? No, I am in server.js task.
+            // Actually, I can use `updateUserCredits` passing negative? No, it sets absolute value.
+            // I will use `updateUserCredits` but passing calculated value `newCredits`.
+            
+            await LocalDB.updateUserCredits(uid, -1, false, 'CONSUME'); // Wait, updateUserCredits adds `creditsToAdd`.
+            // Let's check LocalDB implementation.
+            /* 
+            async updateUserCredits(uid, creditsToAdd, isUnlimited, txnRef) {
+                // ...
+                newCredits += creditsToAdd; 
+            */
+            // Yes, it acts as incrementer! So passing -1 works perfectly.
+            
+            res.json({ success: true, remaining: newCredits });
+        } else {
+            res.status(403).json({ error: 'Insufficient credits' });
+        }
+    } catch (e) {
+        console.error("Consume Credit Error:", e);
+        res.status(500).json({ error: 'Failed to consume credit' });
+    }
+});
 
 // --- DASHBOARD ENDPOINTS ---
 
 // Shared Stats Logic
 async function getStatsData() {
     const isConnected = (Date.now() - lastAppHeartbeat) < 8000;
-    
-    let stats = {
-        verified: 0,
-        rejected: 0,
-        pending: 0,
-        revenue: 0,
-        isPhoneConnected: isConnected,
-        recentTransactions: []
-    };
-
-    if (db) {
-        const snapshot = await db.collection('transactions').get();
-        const txns = [];
-        snapshot.forEach(doc => {
-            const data = doc.data();
-            txns.push({
-                id: doc.id,
-                ...data,
-                date: (data.createdAt && data.createdAt.toDate) ? data.createdAt.toDate() : new Date()
-            });
-            
-            if (data.status === 'COMPLETED') {
-                stats.verified++;
-                stats.revenue += (data.amount || 0);
-            } else if (data.status === 'FAILED') {
-                stats.rejected++;
-            } else if (data.status === 'MANUAL_VERIFYING' || data.status === 'PENDING') {
-                stats.pending++;
-            }
-        });
-        
-        // Sort and slice for recent
-        stats.recentTransactions = txns.sort((a,b) => b.date - a.date).slice(0, 10);
-        
-    } else {
-        // Mock Stats
-        const txns = Array.from(mockTransactions.values());
-        txns.forEach(t => {
-            if (t.status === 'COMPLETED') {
-                stats.verified++;
-                stats.revenue += (t.amount || 0);
-            } else if (t.status === 'FAILED') stats.rejected++;
-            else if (t.status === 'MANUAL_VERIFYING' || t.status === 'PENDING') stats.pending++;
-        });
-        stats.recentTransactions = txns.sort((a,b) => b.createdAt - a.createdAt).slice(0, 10);
-    }
-    return stats;
+    const stats = await LocalDB.getStats();
+    return { ...stats, isPhoneConnected: isConnected };
 }
 
 app.get('/api/dashboard/stats', async (req, res) => {
@@ -606,46 +538,16 @@ app.get('/dashboard', (req, res) => {
 // This handles cases where the Admin App missed the transaction or looked it up but found nothing (and didn't report back yet)
 setInterval(async () => {
     try {
-        if (db) {
-            const cutoff = new Date(Date.now() - 60000); // 60 seconds ago
-            
-            const snapshot = await db.collection('transactions')
-                .where('status', '==', 'MANUAL_VERIFYING')
-                .get();
-
-            if (snapshot.empty) return;
-
-            const batch = db.batch();
-            let updateCount = 0;
-
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                // createdAt can be null instantly after creation (latency), check existence
-                if (data.createdAt && data.createdAt.toDate() < cutoff) {
-                    batch.update(doc.ref, { 
-                        status: 'FAILED',
-                        verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-                        failureReason: 'Timeout - Code not found or System busy'
-                    });
-                    updateCount++;
-                }
-            });
-
-            if (updateCount > 0) {
-                await batch.commit();
-                console.log(`[Cleanup] Expired ${updateCount} stale transactions.`);
-            }
-        } else {
-            // Cleanup Mock
-            const cutoff = Date.now() - 60000;
-            mockTransactions.forEach(t => {
-                if (t.status === 'MANUAL_VERIFYING' && t.createdAt.getTime() < cutoff) {
-                    t.status = 'FAILED';
-                    t.verifiedAt = new Date();
-                    console.log(`[Cleanup Mock] Expired ${t.id}`);
-                }
-            });
+    try {
+        const cutoff = new Date(Date.now() - 60000).toISOString();
+        const changes = await LocalDB.expireStaleTransactions(cutoff);
+        if (changes > 0) {
+            console.log(`[Cleanup] Expired ${changes} stale transactions.`);
+            broadcastStats();
         }
+    } catch (error) {
+        console.error("[Cleanup] Error expiring transactions:", error);
+    }
     } catch (error) {
         console.error("[Cleanup] Error expiring transactions:", error);
     }
@@ -654,19 +556,9 @@ setInterval(async () => {
 // Dashboard: Clear All Stats
 app.post('/api/dashboard/clear-stats', async (req, res) => {
     try {
-        if (db) {
-            const snapshot = await db.collection('transactions').get();
-            const batch = db.batch();
-            snapshot.forEach(doc => batch.delete(doc.ref));
-            await batch.commit();
-            console.log(`[Dashboard] Cleared ${snapshot.size} transactions`);
-            res.json({ success: true, deleted: snapshot.size });
-        } else {
-            // Clear mock
-            const count = mockTransactions.size;
-            mockTransactions.clear();
-            res.json({ success: true, deleted: count });
-        }
+            const deleted = await LocalDB.clearAllStats();
+            console.log(`[Dashboard] Cleared ${deleted} transactions`);
+            res.json({ success: true, deleted });
         broadcastStats(); // Update clients
     } catch (e) {
         console.error("[Dashboard] Clear stats error:", e);
