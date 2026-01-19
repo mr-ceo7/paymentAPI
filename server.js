@@ -493,6 +493,67 @@ app.post('/api/verify-result', async (req, res) => {
 
 // 4. User Credit Management (API for Frontend)
 app.get('/api/user/credits', async (req, res) => {
+    // ... existing ...
+});
+
+// Admin: Edit User Credits Manually
+app.post('/api/admin/users/:uid/credits', async (req, res) => {
+    const { uid } = req.params;
+    const { credits, isUnlimited } = req.body;
+
+    if (!uid || credits === undefined) {
+        return res.status(400).json({ error: 'Missing fields' });
+    }
+
+    try {
+        // We use updateUserCredits but we need to calculate 'creditsToAdd' difference or just force set?
+        // Existing method is `updateUserCredits(uid, creditsToAdd, isUnlimited, txnRef)` which ADDS.
+        // We want to SET.
+        // Let's modify LocalDB or just calculate diff? 
+        // Diff is safer with existing method but prone to race conditions if not careful.
+        // Better: Add a `setUserCredits` method or reuse `importUser` which does SET/Update?
+        // `importUser` does SET. Let's use that! simpler.
+        // But `importUser` expects full object.
+        
+        // Let's just fetch, calc diff, and use update?
+        // Or better: Implement a specific SET method in LocalDB for clarity?
+        // Actually, `importUser` calls UPDATE ... SET credits = ?. That IS a set.
+        // But we need to preserve other fields.
+        
+        const user = await LocalDB.getUser(uid);
+        const currentRef = user ? user.lastPaymentRef : 'ADMIN_EDIT';
+        const currentEmail = user ? user.email : null;
+        const currentReset = user ? user.lastDailyReset : null;
+
+        await LocalDB.importUser({
+            uid,
+            email: currentEmail,
+            credits: parseInt(credits),
+            unlimitedExpiresAt: isUnlimited ? new Date(Date.now() + 30*24*60*60*1000).toISOString() : null, // 30 days if setting unlimited
+            lastDailyReset: currentReset,
+            lastPaymentRef: 'ADMIN_MANUAL'
+        });
+
+        // Trigger Broadcast
+        broadcastStats();
+        
+        // Also queue sync? importUser does NOT queue sync!
+        // We MUST queue sync for this change to propagate to Cloud.
+        await LocalDB.addToSyncQueue('users', uid, 'update', { 
+            credits: parseInt(credits),
+            unlimitedExpiresAt: isUnlimited ? new Date(Date.now() + 30*24*60*60*1000).toISOString() : null,
+            lastPaymentRef: 'ADMIN_MANUAL'
+        });
+
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Admin Edit User Error:", e);
+        res.status(500).json({ error: 'Update failed' });
+    }
+});
+
+// 4. User Credit Management (API for Frontend)
+app.get('/api/user/credits', async (req, res) => {
     const { uid } = req.query;
     if (!uid) return res.status(400).json({ error: 'Missing UID' });
 

@@ -79,6 +79,7 @@ class SyncService {
             const data = doc.data();
             await LocalDB.importUser({
                 uid: doc.id,
+                email: data.email || null, // Map email
                 credits: data.credits || 0,
                 unlimitedExpiresAt: data.unlimitedExpiresAt || null,
                 lastDailyReset: data.lastDailyReset || null,

@@ -49,9 +49,24 @@ class LocalDatabase {
                 uid TEXT PRIMARY KEY,
                 credits INTEGER DEFAULT 0,
                 unlimitedExpiresAt DATETIME,
+                lastDailyReset DATETIME,
                 lastPaymentRef TEXT
             )
         `);
+
+        // Migration: Ensure lastDailyReset exists for existing tables
+        try {
+            // Check if column exists first to avoid error spam
+            const result = await this.db.all("PRAGMA table_info(users)");
+            const hasColumn = result.some(c => c.name === 'lastDailyReset');
+            
+            if (!hasColumn) {
+                console.log('[LocalDB] Migrating: Adding lastDailyReset column to users table...');
+                await this.db.exec("ALTER TABLE users ADD COLUMN lastDailyReset DATETIME");
+            }
+        } catch (e) {
+            console.error('[LocalDB] Migration Error:', e);
+        }
 
         // Sync Queue Table (For changes that need to go to Firebase)
         await this.db.exec(`
@@ -218,11 +233,13 @@ class LocalDatabase {
 
     async updateUserCredits(uid, creditsToAdd, isUnlimited, txnRef) {
         // Upsert User
-        let user = await this.db.get('SELECT * FROM users WHERE uid = ?', uid); // Don't use this.getUser to avoid recursive reset checks if possible, though harmless
+        let user = await this.db.get('SELECT * FROM users WHERE uid = ?', uid); 
         
         let newCredits = (user ? user.credits : 0);
         let unlimitedExpires = (user ? user.unlimitedExpiresAt : null);
         let lastDailyReset = (user ? user.lastDailyReset : new Date().toISOString());
+        // Preserve existing email if updating, but we don't usually update email here.
+        let email = (user ? user.email : null); 
 
         if (isUnlimited) {
             const date = new Date();
@@ -238,8 +255,8 @@ class LocalDatabase {
             `, [newCredits, unlimitedExpires, lastDailyReset, txnRef, uid]);
         } else {
              await this.db.run(`
-                INSERT INTO users (uid, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef) VALUES (?, ?, ?, ?, ?)
-            `, [uid, newCredits, unlimitedExpires, lastDailyReset, txnRef]);
+                INSERT INTO users (uid, email, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef) VALUES (?, ?, ?, ?, ?, ?)
+            `, [uid, email, newCredits, unlimitedExpires, lastDailyReset, txnRef]);
         }
 
         // Sync Queue
@@ -248,23 +265,24 @@ class LocalDatabase {
             unlimitedExpiresAt: unlimitedExpires,
             lastDailyReset,
             lastPaymentRef: txnRef 
-        }); // Note: 'update' op works for upsert in Firestore if we use set merge:true
+            // Don't overwrite email in cloud with null if we don't have it
+        }); 
     }
 
     // Import from Cloud (Bypasses Sync Queue)
     async importUser(data) {
-        const { uid, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef } = data;
+        const { uid, email, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef } = data;
         
         const existing = await this.db.get('SELECT uid FROM users WHERE uid = ?', uid);
         
         if (existing) {
              await this.db.run(`
-                UPDATE users SET credits = ?, unlimitedExpiresAt = ?, lastDailyReset = ?, lastPaymentRef = ? WHERE uid = ?
-            `, [credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef, uid]);
+                UPDATE users SET email = ?, credits = ?, unlimitedExpiresAt = ?, lastDailyReset = ?, lastPaymentRef = ? WHERE uid = ?
+            `, [email, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef, uid]);
         } else {
              await this.db.run(`
-                INSERT INTO users (uid, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef) VALUES (?, ?, ?, ?, ?)
-            `, [uid, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef]);
+                INSERT INTO users (uid, email, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef) VALUES (?, ?, ?, ?, ?, ?)
+            `, [uid, email, credits, unlimitedExpiresAt, lastDailyReset, lastPaymentRef]);
         }
         return { success: true };
     }
