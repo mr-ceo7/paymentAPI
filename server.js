@@ -38,6 +38,7 @@ app.use(helmet({
             styleSrc: ["'self'", "'unsafe-inline'", "https:", "https://fonts.googleapis.com"],
             fontSrc: ["'self'", "https://fonts.gstatic.com"],
             connectSrc: ["'self'", "https:", "wss:"],
+            scriptSrcAttr: ["'unsafe-inline'"],
         },
     },
 })); 
@@ -530,6 +531,65 @@ app.get('/api/dashboard/stats', async (req, res) => {
 
 app.get('/dashboard', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+// --- ADMIN API (Database Manager) ---
+
+app.get('/api/admin/transactions', async (req, res) => {
+    try {
+        const txns = await LocalDB.getAllTransactions();
+        res.json(txns);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/api/admin/transactions/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const changes = await LocalDB.deleteTransaction(id);
+        if (changes > 0) broadcastStats();
+        res.json({ success: true, deleted: changes });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/admin/transactions', async (req, res) => {
+    try {
+        const data = req.body;
+        // Basic validation
+        if (!data.uid || !data.amount) return res.status(400).json({ error: "Missing UID or Amount" });
+        
+        const id = data.id || `txn_manual_${Date.now()}`;
+        await LocalDB.createTransaction({
+            id,
+            uid: data.uid,
+            planId: data.planId || 'manual',
+            amount: data.amount,
+            phone: data.phone || 'N/A',
+            mpesaCode: data.mpesaCode || 'MANUAL_ENTRY',
+            status: data.status || 'COMPLETED',
+            type: 'MANUAL_ADMIN',
+            createdAt: new Date().toISOString(),
+            ...data
+        });
+        
+        broadcastStats();
+        res.json({ success: true, id });
+    } catch (e) {
+        console.error("Admin Create Error:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const users = await LocalDB.getAllUsers();
+        res.json(users);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- BACKGROUND TASKS ---

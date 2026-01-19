@@ -155,12 +155,21 @@ class LocalDatabase {
         return result.changes;
     }
 
+    async deleteTransaction(id) {
+        const result = await this.db.run('DELETE FROM transactions WHERE id = ?', id);
+        return result.changes;
+    }
+
     async clearAllStats() {
         const result = await this.db.run("DELETE FROM transactions");
         return result.changes;
     }
 
     // --- Users ---
+
+    async getAllUsers() {
+        return await this.db.all("SELECT * FROM users ORDER BY credits DESC");
+    }
 
     async getUser(uid) {
         return await this.db.get('SELECT * FROM users WHERE uid = ?', uid);

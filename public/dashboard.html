@@ -86,6 +86,12 @@
                 <h1 class="text-2xl font-bold tracking-tight">Mission Control</h1>
                 <p class="text-gray-400 text-sm">Mainnet Status: <span class="text-emerald-400 font-mono">ONLINE</span></p>
             </div>
+            
+            <!-- Navigation -->
+            <div class="flex items-center gap-1 bg-black/20 p-1 rounded-lg ml-8 relative">
+                 <button onclick="switchView('overview')" id="tab-overview" class="px-3 py-1.5 rounded-md text-sm font-medium bg-white/10 text-white shadow-sm transition-all">Overview</button>
+                 <button onclick="switchView('database')" id="tab-database" class="px-3 py-1.5 rounded-md text-sm font-medium text-gray-400 hover:text-white hover:bg-white/5 transition-all">Database</button>
+            </div>
         </div>
 
         <div class="flex items-center gap-4 mt-4 md:mt-0 z-10">
@@ -102,8 +108,8 @@
         </div>
     </header>
 
-    <!-- Main Grid -->
-    <div class="grid grid-cols-12 gap-6 w-full">
+    <!-- Main Grid (Overview) -->
+    <div id="overview-view" class="grid grid-cols-12 gap-6 w-full transition-opacity duration-300">
         
         <!-- Left Column: Metrics & Charts (8 cols) -->
         <div class="col-span-12 lg:col-span-8 flex flex-col gap-6">
@@ -210,6 +216,108 @@
             </div>
         </div>
 
+    </div>
+
+    <!-- Database View (Hidden) -->
+    <div id="database-view" class="hidden w-full h-full flex flex-col gap-6 animate-fade-in">
+        <!-- Toolbar -->
+        <div class="flex justify-between items-center glass p-4 rounded-xl">
+            <h2 class="text-lg font-semibold flex items-center gap-2">
+                <i data-lucide="database" class="w-5 h-5 text-brand-500"></i> LocalDB Explorer
+            </h2>
+            
+            <!-- View Switcher -->
+            <div class="flex bg-black/40 rounded-lg p-1">
+                 <button onclick="switchDbView('transactions')" id="btn-view-txns" class="px-3 py-1 rounded-md text-xs font-semibold bg-brand-600 text-white shadow transition-all">Transactions</button>
+                 <button onclick="switchDbView('users')" id="btn-view-users" class="px-3 py-1 rounded-md text-xs font-semibold text-gray-400 hover:text-white transition-all">Users</button>
+            </div>
+
+            <div class="flex gap-2">
+                 <button onclick="refreshCurrentDb()" class="px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm border border-white/10 flex items-center gap-2 transition-colors">
+                    <i data-lucide="refresh-cw" class="w-4 h-4"></i> Refresh
+                </button>
+                <button onclick="openAddModal()" class="px-3 py-2 bg-brand-600 hover:bg-brand-500 rounded-lg text-sm font-bold shadow-lg shadow-brand-600/20 flex items-center gap-2 transition-all">
+                    <i data-lucide="plus" class="w-4 h-4"></i> Add Entry
+                </button>
+            </div>
+        </div>
+
+        <!-- DB Table (Transactions) -->
+        <div id="table-transactions" class="glass rounded-2xl overflow-hidden flex-1 flex flex-col min-h-[500px]">
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm text-left">
+                    <thead class="text-xs text-gray-400 uppercase bg-black/20">
+                        <tr>
+                            <th class="px-6 py-4">ID</th>
+                            <th class="px-6 py-4">Date</th>
+                            <th class="px-6 py-4">User</th>
+                            <th class="px-6 py-4">Plan / Amount</th>
+                            <th class="px-6 py-4">Method</th>
+                            <th class="px-6 py-4 text-center">Status</th>
+                            <th class="px-6 py-4 text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="db-table-body" class="divide-y divide-gray-700/50">
+                        <tr><td colspan="7" class="py-10 text-center text-gray-500">Click Refresh to load data</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- DB Table (Users) -->
+        <div id="table-users" class="glass rounded-2xl overflow-hidden flex-1 flex flex-col min-h-[500px] hidden">
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm text-left">
+                     <thead class="text-xs text-gray-400 uppercase bg-black/20">
+                        <tr>
+                            <th class="px-6 py-4">UID</th>
+                            <th class="px-6 py-4">Credits</th>
+                            <th class="px-6 py-4">Unlimited Expiry</th>
+                            <th class="px-6 py-4">Last Payment</th>
+                        </tr>
+                    </thead>
+                    <tbody id="users-table-body" class="divide-y divide-gray-700/50">
+                        <tr><td colspan="4" class="py-10 text-center text-gray-500">Loading users...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Transaction Modal -->
+    <div id="add-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+        <div class="glass bg-[#0f172a] p-6 rounded-2xl w-full max-w-md relative">
+            <button onclick="closeAddModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
+            <h3 class="text-xl font-bold mb-4">Add Manual Entry</h3>
+            <form id="add-form" onsubmit="submitAddEntry(event)" class="space-y-4">
+                <div>
+                    <label class="block text-xs font-medium text-gray-400 mb-1">User ID (Email/UID)</label>
+                    <input type="text" name="uid" class="w-full bg-black/20 border border-white/10 rounded-lg p-2 text-sm focus:border-brand-500 outline-none" placeholder="e.g. user_123" required>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                         <label class="block text-xs font-medium text-gray-400 mb-1">Amount (KES)</label>
+                         <input type="number" name="amount" class="w-full bg-black/20 border border-white/10 rounded-lg p-2 text-sm focus:border-brand-500 outline-none" value="1" required>
+                    </div>
+                    <div>
+                         <label class="block text-xs font-medium text-gray-400 mb-1">Plan</label>
+                         <select name="planId" class="w-full bg-black/20 border border-white/10 rounded-lg p-2 text-sm focus:border-brand-500 outline-none">
+                             <option value="starter">Starter (1 Credits)</option>
+                             <option value="pro">Pro (19 Credits)</option>
+                             <option value="unlimited">Unlimited</option>
+                             <option value="manual">Custom</option>
+                         </select>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-400 mb-1">M-Pesa Code (Optional)</label>
+                    <input type="text" name="mpesaCode" class="w-full bg-black/20 border border-white/10 rounded-lg p-2 text-sm focus:border-brand-500 outline-none" placeholder="MANUAL_ENTRY">
+                </div>
+                <div class="pt-2">
+                    <button type="submit" class="w-full py-2 bg-brand-600 hover:bg-brand-500 rounded-lg font-bold shadow-lg shadow-brand-600/20 transition-all">Create Transaction</button>
+                </div>
+            </form>
+        </div>
     </div>
 
     <!-- Modals / Toasts (Optional placeholder) -->
@@ -420,10 +528,13 @@
         }
 
         // --- Init ---
-        document.getElementById('refresh-btn').addEventListener('click', () => {
+        document.getElementById('refresh-btn').addEventListener('click', function() {
              socket.emit('request_stats');
-             this.querySelector('i').classList.add('animate-spin');
-             setTimeout(() => this.querySelector('i').classList.remove('animate-spin'), 1000);
+             const icon = this.querySelector('svg') || this.querySelector('i');
+             if(icon) {
+                 icon.classList.add('animate-spin');
+                 setTimeout(() => icon.classList.remove('animate-spin'), 1000);
+             }
         });
 
         document.getElementById('clear-stats-btn').addEventListener('click', async () => {
@@ -437,6 +548,193 @@
 
         // Initial Data Fetch
         fetch('/api/dashboard/stats').then(r=>r.json()).then(updateDashboard);
+
+        // --- Database View Interface ---
+        
+        function switchView(view) {
+            const overview = document.getElementById('overview-view');
+            const database = document.getElementById('database-view');
+            const tabOverview = document.getElementById('tab-overview');
+            const tabDatabase = document.getElementById('tab-database');
+
+            if (view === 'overview') {
+                overview.classList.remove('hidden');
+                database.classList.add('hidden');
+                tabOverview.classList.remove('text-gray-400', 'bg-transparent');
+                tabOverview.classList.add('bg-white/10', 'text-white', 'shadow-sm');
+                tabDatabase.classList.add('text-gray-400');
+                tabDatabase.classList.remove('bg-white/10', 'text-white', 'shadow-sm');
+            } else {
+                overview.classList.add('hidden');
+                database.classList.remove('hidden');
+                tabDatabase.classList.remove('text-gray-400', 'bg-transparent');
+                tabDatabase.classList.add('bg-white/10', 'text-white', 'shadow-sm');
+                tabOverview.classList.add('text-gray-400');
+                tabOverview.classList.remove('bg-white/10', 'text-white', 'shadow-sm');
+                fetchDatabase(); // Auto load
+            }
+        }
+
+        let currentDbView = 'transactions';
+
+        function switchDbView(view) {
+             currentDbView = view;
+             const btnTxns = document.getElementById('btn-view-txns');
+             const btnUsers = document.getElementById('btn-view-users');
+             const tableTxns = document.getElementById('table-transactions');
+             const tableUsers = document.getElementById('table-users');
+
+             if(view === 'transactions') {
+                 btnTxns.classList.remove('text-gray-400');
+                 btnTxns.classList.add('bg-brand-600', 'text-white');
+                 btnUsers.classList.add('text-gray-400');
+                 btnUsers.classList.remove('bg-brand-600', 'text-white');
+                 
+                 tableTxns.classList.remove('hidden');
+                 tableUsers.classList.add('hidden');
+                 fetchDatabase();
+             } else {
+                 btnUsers.classList.remove('text-gray-400');
+                 btnUsers.classList.add('bg-brand-600', 'text-white');
+                 btnTxns.classList.add('text-gray-400');
+                 btnTxns.classList.remove('bg-brand-600', 'text-white');
+
+                 tableUsers.classList.remove('hidden');
+                 tableTxns.classList.add('hidden');
+                 fetchUsers();
+             }
+        }
+
+        function refreshCurrentDb() {
+            if(currentDbView === 'transactions') fetchDatabase();
+            else fetchUsers();
+        }
+
+        async function fetchUsers() {
+            const tbody = document.getElementById('users-table-body');
+            tbody.innerHTML = `<tr><td colspan="4" class="py-10 text-center text-gray-500 animate-pulse">Loading users...</td></tr>`;
+            try {
+                const res = await fetch('/api/admin/users');
+                const data = await res.json();
+                renderUserTable(data);
+            } catch (e) {
+                tbody.innerHTML = `<tr><td colspan="4" class="py-10 text-center text-red-500">Failed to load users</td></tr>`;
+            }
+        }
+
+        function renderUserTable(users) {
+            const tbody = document.getElementById('users-table-body');
+            if(!users || users.length === 0) {
+                 tbody.innerHTML = `<tr><td colspan="4" class="py-10 text-center text-gray-500 italic">No users found</td></tr>`;
+                 return;
+            }
+            tbody.innerHTML = users.map(u => {
+                const isUnlimited = u.unlimitedExpiresAt && new Date(u.unlimitedExpiresAt) > new Date();
+                return `
+                <tr class="hover:bg-white/5 transition-colors border-b border-gray-700/30 last:border-0">
+                    <td class="px-6 py-4 font-medium text-white">${u.uid}</td>
+                    <td class="px-6 py-4 font-mono text-brand-400 text-lg">${u.credits}</td>
+                    <td class="px-6 py-4">
+                        ${isUnlimited 
+                            ? `<span class="px-2 py-1 rounded bg-purple-500/20 text-purple-400 text-xs font-bold uppercase">Active until ${new Date(u.unlimitedExpiresAt).toLocaleDateString()}</span>` 
+                            : '<span class="text-gray-500 text-xs">Inactive</span>'}
+                    </td>
+                    <td class="px-6 py-4 text-xs text-gray-400 font-mono">${u.lastPaymentRef || '-'}</td>
+                </tr>
+            `}).join('');
+        }
+
+        async function fetchDatabase() {
+            const tbody = document.getElementById('db-table-body');
+            tbody.innerHTML = `<tr><td colspan="7" class="py-10 text-center text-gray-500 animate-pulse">Loading data...</td></tr>`;
+            
+            try {
+                const res = await fetch('/api/admin/transactions');
+                const data = await res.json();
+                renderDBTable(data);
+            } catch (e) {
+                console.error(e);
+                tbody.innerHTML = `<tr><td colspan="7" class="py-10 text-center text-red-500">Failed to load data</td></tr>`;
+            }
+        }
+
+        function renderDBTable(txns) {
+            const tbody = document.getElementById('db-table-body');
+            if (!txns || txns.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="7" class="py-10 text-center text-gray-500 italic">No entries found</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = txns.map(t => `
+                <tr class="hover:bg-white/5 transition-colors border-b border-gray-700/30 last:border-0">
+                    <td class="px-6 py-4 font-mono text-xs text-gray-400">${t.id}</td>
+                    <td class="px-6 py-4 text-gray-300 whitespace-nowrap">${new Date(t.createdAt).toLocaleString()}</td>
+                    <td class="px-6 py-4 font-medium text-white">${t.uid}</td>
+                    <td class="px-6 py-4">
+                        <div class="flex flex-col">
+                            <span class="text-white capitalize">${t.planId}</span>
+                            <span class="text-xs text-gray-500 font-mono">${t.amount} KES</span>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 text-gray-400 text-xs">${t.mpesaCode || '-'}</td>
+                    <td class="px-6 py-4 text-center">
+                         <span class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${getStatusColor(t.status)}">
+                            ${t.status}
+                        </span>
+                    </td>
+                    <td class="px-6 py-4 text-right">
+                        <button onclick="deleteTransaction('${t.id}')" class="p-2 hover:bg-red-500/20 rounded-lg text-gray-400 hover:text-red-400 transition-colors" title="Delete">
+                            <i data-lucide="trash-2" class="w-4 h-4"></i>
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+            lucide.createIcons();
+        }
+
+        async function deleteTransaction(id) {
+            if(!confirm(`Delete transaction ${id}? This cannot be undone.`)) return;
+            try {
+                const res = await fetch(`/api/admin/transactions/${id}`, { method: 'DELETE' });
+                const json = await res.json();
+                if(json.success) {
+                    showToast('Entry deleted');
+                    fetchDatabase(); // Reload
+                } else {
+                    alert('Delete failed: ' + json.error);
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        // Modal Logic
+        function openAddModal() { document.getElementById('add-modal').classList.remove('hidden'); document.getElementById('add-modal').classList.add('flex'); }
+        function closeAddModal() { document.getElementById('add-modal').classList.add('hidden'); document.getElementById('add-modal').classList.remove('flex'); }
+
+        async function submitAddEntry(e) {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const data = Object.fromEntries(formData.entries());
+            
+            try {
+                const res = await fetch('/api/admin/transactions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const json = await res.json();
+                
+                if(json.success) {
+                    showToast('Transaction created successfully');
+                    closeAddModal();
+                    e.target.reset();
+                    fetchDatabase();
+                } else {
+                    alert('Error: ' + json.error);
+                }
+            } catch(err) {
+                 alert('Network Error');
+            }
+        }
 
     </script>
     
