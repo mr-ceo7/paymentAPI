@@ -136,7 +136,9 @@ let lastAppHeartbeat = 0; // Timestamp of last poll from mobile app
 const PLANS = {
     'starter': { credits: 3, price: 1 },
     'pro': { credits: 19, price: 9 },
-    'unlimited': { credits: 9999, price: 99, durationDays: 30 }
+    'unlimited': { credits: 9999, price: 99, durationDays: 30 },
+    'BASIC_LABS': { credits: 0, price: 39, name: 'Report Labs' },
+    'REPORT_LABS': { credits: 0, price: 39, name: 'Report Labs' }
 };
 
 app.get('/', (req, res) => {
