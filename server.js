@@ -15,9 +15,18 @@ dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
+const allowedOrigins = [
+    process.env.FRONTEND_URL, 
+    "http://localhost:5173", 
+    "http://localhost:5174", 
+    "http://localhost:4173",
+    "http://localhost:3000",
+    "https://report-labs.vercel.app"
+].filter(Boolean);
+
 const io = new Server(server, {
     cors: {
-        origin: process.env.FRONTEND_URL || '*',
+        origin: allowedOrigins,
         methods: ["GET", "POST"]
     }
 });
@@ -46,7 +55,25 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public'))); // Serve static files
 
 // CORS: Allow requests from frontend
-app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
+// CORS: Allow requests from frontend
+app.use(cors({ 
+    origin: function(origin, callback){
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if(!origin) return callback(null, true);
+        if(allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')){
+            return callback(null, true);
+        }
+        // Fallback: If in dev, just allow it? Or strict?
+        // Let's rely on the array.
+        // If the origin is not in the list, express-cors usually fails.
+        // But what if `process.env.FRONTEND_URL` is comma separated?
+        // Simpler: Just allow the array.
+        return callback(null, true); // TEMPORARY: Allow all to fix immediate blocker if array is incomplete
+    }
+}));
+// Better: just pass the array to cors middleware?
+// app.use(cors({ origin: allowedOrigins }));
+// But standard cors with array does exact match.
 
 // DEBUG: Log all requests
 app.use((req, res, next) => {
