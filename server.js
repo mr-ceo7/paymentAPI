@@ -168,6 +168,66 @@ const PLANS = {
     'REPORT_LABS': { credits: 0, price: 39, name: 'Report Labs' }
 };
 
+// Auto-Payout Configuration
+const AUTO_PAYOUT_ENABLED = process.env.AUTO_PAYOUT_ENABLED === 'true';
+const PAYOUT_PHONE = process.env.PAYOUT_PHONE || ''; // Your M-Pesa number to receive payouts
+
+/**
+ * Auto-withdraw payment to owner's M-Pesa after successful transaction
+ * Uses Lipana's sendToPhone API
+ */
+async function autoPayoutToOwner(amount, transactionId) {
+    if (!AUTO_PAYOUT_ENABLED) {
+        console.log(`[Payout] Auto-payout disabled. Skipping withdrawal.`);
+        return { success: false, reason: 'disabled' };
+    }
+    
+    if (!PAYOUT_PHONE) {
+        console.log(`[Payout] No PAYOUT_PHONE configured. Skipping withdrawal.`);
+        return { success: false, reason: 'no_phone' };
+    }
+    
+    const API_KEY = process.env.LIPANA_SECRET_KEY;
+    if (!API_KEY) {
+        console.log(`[Payout] No LIPANA_SECRET_KEY. Skipping withdrawal.`);
+        return { success: false, reason: 'no_api_key' };
+    }
+    
+    try {
+        // Normalize phone format
+        let phone = PAYOUT_PHONE.replace(/\s+/g, '').replace(/[^0-9+]/g, '');
+        if (phone.startsWith('0')) {
+            phone = '254' + phone.substring(1);
+        } else if (phone.startsWith('+')) {
+            phone = phone.substring(1);
+        }
+        
+        console.log(`[Payout] Initiating auto-withdrawal of ${amount} KES to ${phone}`);
+        
+        // Call Lipana Payout API
+        const response = await axios.post(
+            `${LIPANA_BASE_URL}/payouts/send-to-phone`,
+            { phone, amount },
+            { headers: { 'x-api-key': API_KEY, 'Content-Type': 'application/json' } }
+        );
+        
+        console.log(`[Payout] ✅ Withdrawal initiated:`, response.data);
+        return { success: true, data: response.data };
+        
+    } catch (error) {
+        // Log but don't fail the main flow
+        if (error.response) {
+            console.error(`[Payout] ❌ Failed:`, {
+                status: error.response.status,
+                data: error.response.data
+            });
+        } else {
+            console.error(`[Payout] ❌ Failed:`, error.message);
+        }
+        return { success: false, error: error.message };
+    }
+}
+
 app.get('/', (req, res) => {
     res.send('UoN Smart Timetable Secure Backend 🛡️');
 });
@@ -376,6 +436,11 @@ app.post('/api/callback', async (req, res) => {
             });
             
             console.log(`[Webhook] ✅ User ${txn.uid} credited with ${plan.credits} credits.`);
+            
+            // Auto-withdraw to owner's M-Pesa if enabled
+            if (txn.amount && txn.amount > 0) {
+                autoPayoutToOwner(txn.amount, transactionId);
+            }
             
             // Broadcast to connected dashboards
             broadcastStats();
