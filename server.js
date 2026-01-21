@@ -161,8 +161,8 @@ let lastAppHeartbeat = 0; // Timestamp of last poll from mobile app
 
 // Plans (Sync with frontend if needed, but validation happens here)
 const PLANS = {
-    'starter': { credits: 3, price: 1 },
-    'pro': { credits: 19, price: 9 },
+    'starter': { credits: 3, price: 10 },
+    'pro': { credits: 19, price: 29 },
     'unlimited': { credits: 9999, price: 99, durationDays: 30 },
     'BASIC_LABS': { credits: 0, price: 39, name: 'Report Labs' },
     'REPORT_LABS': { credits: 0, price: 39, name: 'Report Labs' }
@@ -219,17 +219,34 @@ app.post('/api/pay', async (req, res) => {
             // Mock Response structure
             response = { data: { data: { checkoutRequestID: checkoutReqId } } };
         } else {
+            // Normalize phone number format for Lipana (expects 254xxxxxxxxx)
+            let formattedPhone = phone.replace(/\s+/g, '').replace(/[^0-9+]/g, '');
+            if (formattedPhone.startsWith('0')) {
+                formattedPhone = '254' + formattedPhone.substring(1);
+            } else if (formattedPhone.startsWith('+')) {
+                formattedPhone = formattedPhone.substring(1);
+            }
+            
+            console.log(`[Pay] Calling Lipana STK Push: phone=${formattedPhone}, amount=${plan.price}`);
+            
             // REAL MODE: Call Lipana
              response = await axios.post(
                 `${LIPANA_BASE_URL}/transactions/push-stk`,
-                { phone, amount: plan.price },
-                { headers: { 'Authorization': `Bearer ${API_KEY}` } }
+                { phone: formattedPhone, amount: plan.price },
+                { headers: { 'x-api-key': API_KEY, 'Content-Type': 'application/json' } }
             );
-            checkoutReqId = response.data.data?.checkoutRequestID;
+            
+            console.log(`[Pay] Lipana Response:`, JSON.stringify(response.data, null, 2));
+            
+            // Try multiple response formats Lipana might use
+            checkoutReqId = response.data.data?.checkoutRequestID || 
+                           response.data.checkoutRequestID ||
+                           response.data.data?.transactionId ||
+                           response.data.transactionId;
         }
 
 
-        if (!checkoutReqId) throw new Error("No CheckoutRequestID from Lipana");
+        if (!checkoutReqId) throw new Error("No transactionId from Lipana");
 
         // Save Transaction Locally (Syncs to Cloud automatically)
         await LocalDB.createTransaction({
@@ -239,12 +256,16 @@ app.post('/api/pay', async (req, res) => {
             amount: plan.price,
             phone,
             status: 'PENDING',
+            type: 'STK',
             createdAt: new Date().toISOString()
         });
 
+        console.log(`[Pay] Transaction saved: ${checkoutReqId}`);
+
         res.json({ 
             success: true, 
-            message: "STK Push Sent", 
+            message: "STK Push Sent",
+            transactionId: checkoutReqId
         });
 
         // Broadcast Stats Update
@@ -252,8 +273,16 @@ app.post('/api/pay', async (req, res) => {
 
 
     } catch (error) {
-        console.error("Payment Init Error:", error.message);
-        res.status(500).json({ error: 'Payment initiation failed' });
+        // Log detailed Lipana error response
+        if (error.response) {
+            console.error("Payment Init Error - Lipana Response:", {
+                status: error.response.status,
+                data: error.response.data
+            });
+        } else {
+            console.error("Payment Init Error:", error.message);
+        }
+        res.status(500).json({ error: error.response?.data?.message || 'Payment initiation failed' });
     }
 });
 
@@ -294,27 +323,44 @@ app.get('/api/payment-status', (req, res) => {
 });
 
 // MOCK DB (In-Memory)
-// 2. Webhook Callback
+// 2. Webhook Callback (Lipana sends payment status updates here)
 
 // 2. Webhook Callback
 app.post('/api/callback', async (req, res) => {
     try {
-        const { checkoutRequestID, status, amount } = req.body;
-        // Verify signature here using LIPANA_IV_KEY if available (TODO)
+        // Lipana webhook format: { event: "payment.success", data: { transactionId, status, ... } }
+        // Also support legacy format: { checkoutRequestID, status }
+        const body = req.body;
         
-        console.log(`[Webhook] ${checkoutRequestID} - ${status}`);
+        // Extract transaction ID (support both formats)
+        const transactionId = body.data?.transactionId || body.transactionId || body.checkoutRequestID;
+        const status = body.data?.status || body.status;
+        const event = body.event; // e.g., "payment.success", "payment.failed"
+        
+        console.log(`[Webhook] Received:`, JSON.stringify(body, null, 2));
+        console.log(`[Webhook] TransactionId: ${transactionId}, Status: ${status}, Event: ${event}`);
 
-        if (!checkoutRequestID) return res.sendStatus(400);
+        if (!transactionId) {
+            console.error("[Webhook] Missing transactionId");
+            return res.sendStatus(400);
+        }
 
-        const txn = await LocalDB.getTransaction(checkoutRequestID);
+        const txn = await LocalDB.getTransaction(transactionId);
         if (!txn) {
-            console.error("Transaction not found:", checkoutRequestID);
+            console.error("Transaction not found:", transactionId);
             return res.sendStatus(404);
         }
 
-        if (txn.status === 'COMPLETED') return res.sendStatus(200);
+        if (txn.status === 'COMPLETED') {
+            console.log(`[Webhook] Transaction ${transactionId} already completed`);
+            return res.sendStatus(200);
+        }
 
-        if (status === 'Success' || status === 'Completed') {
+        // Check for success (Lipana uses "success" or event "payment.success")
+        const isSuccess = status === 'success' || status === 'Success' || status === 'Completed' || event === 'payment.success';
+        const isFailed = status === 'failed' || status === 'Failed' || event === 'payment.failed';
+
+        if (isSuccess) {
             const plan = PLANS[txn.planId];
             
             // Fulfill Credits & Update Status
@@ -322,16 +368,24 @@ app.post('/api/callback', async (req, res) => {
                 txn.uid, 
                 plan.credits, 
                 txn.planId === 'unlimited', 
-                checkoutRequestID
+                transactionId
             );
 
-            await LocalDB.updateTransactionStatus(checkoutRequestID, 'COMPLETED', {
+            await LocalDB.updateTransactionStatus(transactionId, 'COMPLETED', {
                 verifiedAt: new Date().toISOString()
             });
             
-            console.log(`[Fulfillment] User ${txn.uid} credited.`);
+            console.log(`[Webhook] ✅ User ${txn.uid} credited with ${plan.credits} credits.`);
+            
+            // Broadcast to connected dashboards
+            broadcastStats();
+        } else if (isFailed) {
+            await LocalDB.updateTransactionStatus(transactionId, 'FAILED', {
+                failedAt: new Date().toISOString()
+            });
+            console.log(`[Webhook] ❌ Transaction ${transactionId} failed.`);
         } else {
-            await LocalDB.updateTransactionStatus(checkoutRequestID, 'FAILED');
+            console.log(`[Webhook] Unknown status for ${transactionId}: ${status}`);
         }
 
         res.sendStatus(200);
@@ -416,12 +470,13 @@ app.get('/api/transaction-status/:id', async (req, res) => {
 
 // Update status response
 app.get('/api/payment-status', (req, res) => {
-    // Check if Stripe/Lipana keys exist
-    const hasKey = !!process.env.LIPANA_CONSUMER_KEY && !!process.env.LIPANA_CONSUMER_SECRET;
+    // Check if Lipana secret key exists (used for STK Push)
+    const hasKey = !!process.env.LIPANA_SECRET_KEY;
+    const isMock = process.env.LIPANA_SECRET_KEY === 'lip_sk_test_mock_key';
     const isDev = process.env.NODE_ENV !== 'production';
     
-    let stkEnabled = hasKey;
-    // if (!hasKey && isDev) stkEnabled = true; // Disable Mock to test fallback UI
+    // Enable STK if we have a real Lipana key (not mock, unless in dev)
+    let stkEnabled = hasKey && (!isMock || isDev);
 
     res.json({ 
         paymentsEnabled: true, 
