@@ -393,9 +393,10 @@ app.post('/api/callback', async (req, res) => {
         const body = req.body;
         
         // Extract transaction ID (support both formats)
-        const transactionId = body.data?.transactionId || body.transactionId || body.checkoutRequestID;
+        // Lipana uses 'transaction_id' in data object
+        const transactionId = body.data?.transaction_id || body.data?.transactionId || body.transactionId || body.checkoutRequestID;
         const status = body.data?.status || body.status;
-        const event = body.event; // e.g., "payment.success", "payment.failed"
+        const event = body.event; // e.g., "payment.success", "payment.failed", "transaction.success"
         
         console.log(`[Webhook] Received:`, JSON.stringify(body, null, 2));
         console.log(`[Webhook] TransactionId: ${transactionId}, Status: ${status}, Event: ${event}`);
@@ -416,8 +417,8 @@ app.post('/api/callback', async (req, res) => {
             return res.sendStatus(200);
         }
 
-        // Check for success (Lipana uses "success" or event "payment.success")
-        const isSuccess = status === 'success' || status === 'Success' || status === 'Completed' || event === 'payment.success';
+        // Check for success (Lipana uses "success" or event "payment.success" or "transaction.success")
+        const isSuccess = status === 'success' || status === 'Success' || status === 'Completed' || event === 'payment.success' || event === 'transaction.success';
         const isFailed = status === 'failed' || status === 'Failed' || event === 'payment.failed';
 
         if (isSuccess) {
