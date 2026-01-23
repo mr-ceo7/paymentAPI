@@ -642,9 +642,7 @@ app.post('/api/verify-result', async (req, res) => {
 });
 
 // 4. User Credit Management (API for Frontend)
-app.get('/api/user/credits', async (req, res) => {
-    // ... existing ...
-});
+
 
 // Admin: Edit User Credits Manually
 app.post('/api/admin/users/:uid/credits', async (req, res) => {
