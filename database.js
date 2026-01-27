@@ -420,6 +420,23 @@ class LocalDatabase {
             )
         `);
 
+        // Migration: Add positioning and animation columns to ads table
+        try {
+            const adsSchema = await this.db.all("PRAGMA table_info(ads)");
+            const hasPosition = adsSchema.some(c => c.name === 'position');
+            
+            if (!hasPosition) {
+                console.log('[LocalDB] Migrating: Adding position/animation columns to ads table...');
+                await this.db.exec(`
+                    ALTER TABLE ads ADD COLUMN position TEXT DEFAULT NULL;
+                    ALTER TABLE ads ADD COLUMN animation TEXT DEFAULT NULL;
+                    ALTER TABLE ads ADD COLUMN ctaPosition TEXT DEFAULT NULL;
+                `);
+            }
+        } catch (e) {
+            console.error('[LocalDB] Ads migration error:', e);
+        }
+
         // Ad Settings Table (Global Configuration)
         await this.db.exec(`
             CREATE TABLE IF NOT EXISTS ad_settings (
@@ -1741,13 +1758,14 @@ class LocalDatabase {
     async createAd(ad) {
         const id = ad.id || `ad_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         await this.db.run(`
-            INSERT INTO ads (id, title, type, mediaUrl, textContent, textStyle, hyperlink, duration, priority, scope, universityId, status, enabled, startDate, endDate, createdBy)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO ads (id, title, type, mediaUrl, textContent, textStyle, hyperlink, duration, priority, scope, universityId, status, enabled, startDate, endDate, createdBy, position, animation, ctaPosition)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
             id, ad.title, ad.type, ad.mediaUrl || null, ad.textContent || null, 
             JSON.stringify(ad.textStyle || {}), ad.hyperlink || null, ad.duration || 10, 
             ad.priority || 0, ad.scope || 'global', ad.universityId || null, 
-            ad.status || 'draft', ad.enabled ? 1 : 0, ad.startDate || null, ad.endDate || null, ad.createdBy
+            ad.status || 'draft', ad.enabled ? 1 : 0, ad.startDate || null, ad.endDate || null, ad.createdBy,
+            JSON.stringify(ad.position || null), JSON.stringify(ad.animation || null), JSON.stringify(ad.ctaPosition || null)
         ]);
         return { id, ...ad };
     }
@@ -1789,6 +1807,9 @@ class LocalDatabase {
         return ads.map(ad => ({
             ...ad,
             textStyle: ad.textStyle ? JSON.parse(ad.textStyle) : {},
+            position: ad.position ? JSON.parse(ad.position) : null,
+            animation: ad.animation ? JSON.parse(ad.animation) : null,
+            ctaPosition: ad.ctaPosition ? JSON.parse(ad.ctaPosition) : null,
             enabled: !!ad.enabled
         }));
     }
@@ -1799,6 +1820,9 @@ class LocalDatabase {
         return {
             ...ad,
             textStyle: ad.textStyle ? JSON.parse(ad.textStyle) : {},
+            position: ad.position ? JSON.parse(ad.position) : null,
+            animation: ad.animation ? JSON.parse(ad.animation) : null,
+            ctaPosition: ad.ctaPosition ? JSON.parse(ad.ctaPosition) : null,
             enabled: !!ad.enabled
         };
     }
@@ -1807,12 +1831,12 @@ class LocalDatabase {
         const fields = [];
         const values = [];
 
-        const allowedFields = ['title', 'type', 'mediaUrl', 'textContent', 'textStyle', 'hyperlink', 'duration', 'priority', 'scope', 'universityId', 'status', 'enabled', 'startDate', 'endDate'];
+        const allowedFields = ['title', 'type', 'mediaUrl', 'textContent', 'textStyle', 'hyperlink', 'duration', 'priority', 'scope', 'universityId', 'status', 'enabled', 'startDate', 'endDate', 'position', 'animation', 'ctaPosition'];
         
         for (const field of allowedFields) {
             if (updates[field] !== undefined) {
                 fields.push(`${field} = ?`);
-                if (field === 'textStyle') {
+                if (['textStyle', 'position', 'animation', 'ctaPosition'].includes(field)) {
                     values.push(JSON.stringify(updates[field]));
                 } else if (field === 'enabled') {
                     values.push(updates[field] ? 1 : 0);

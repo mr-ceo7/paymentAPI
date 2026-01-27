@@ -177,6 +177,10 @@ describe('LocalDB Ads Methods', () => {
       expect(ad).toHaveProperty('type');
       expect(ad).toHaveProperty('status');
       expect(ad).toHaveProperty('enabled');
+      // New fields
+      expect(ad).toHaveProperty('position');
+      expect(ad).toHaveProperty('animation');
+      expect(ad).toHaveProperty('ctaPosition');
     }
   });
 });
